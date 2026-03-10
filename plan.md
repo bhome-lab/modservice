@@ -7,7 +7,7 @@ Build a headless `.NET 10` Windows Service that:
 - watches for target process starts
 - resolves config-driven rules
 - syncs DLLs from GitHub releases by tag
-- passes an ordered list of absolute DLL paths plus resolved environment variables to a private native executor DLL that can itself be sourced from GitHub and loaded from the local cache
+- passes an ordered list of absolute DLL paths plus resolved environment variables and executor option strings to a private native executor DLL that can itself be sourced from GitHub and loaded from the local cache
 
 The managed service owns configuration, matching, GitHub sync, local DLL storage, cleanup, and live reconfiguration.
 
@@ -220,7 +220,10 @@ Two different sources may both contribute `foo.dll` without conflict, because ea
 {
   "executor": {
     "source": "core",
-    "asset": "injector.dll"
+    "asset": "injector.dll",
+    "options": [
+      { "name": "mode", "value": "safe-smoke" }
+    ]
   },
   "sources": [
     { "id": "core", "repo": "owner/core-mods", "tag": "stable" },
@@ -235,6 +238,9 @@ Two different sources may both contribute `foo.dll` without conflict, because ea
       "path": "\\Games\\Game\\",
       "env": [
         { "name": "MOD_PROFILE", "op": "equals", "value": "main" }
+      ],
+      "executorOptions": [
+        { "name": "profile", "value": "main" }
       ],
       "bindings": [
         { "source": "core" },
@@ -297,6 +303,11 @@ typedef struct mm_env_var {
     mm_u16_view value;
 } mm_env_var;
 
+typedef struct mm_option {
+    mm_u16_view name;
+    mm_u16_view value;
+} mm_option;
+
 typedef struct mm_execute_request {
     uint32_t pid;
     uint64_t process_create_time_utc_100ns;
@@ -305,6 +316,8 @@ typedef struct mm_execute_request {
     uint32_t module_count;
     const mm_env_var* env;
     uint32_t env_count;
+    const mm_option* options;
+    uint32_t option_count;
     uint32_t timeout_ms;
 } mm_execute_request;
 
@@ -318,6 +331,7 @@ MM_API mm_status MM_CALL mm_execute(
 ### ABI rules
 - `modules` contains an ordered list of absolute DLL paths
 - `env` contains a resolved list of environment variable name/value pairs selected by the service
+- `options` contains a resolved list of executor option name/value pairs selected by the service
 - Native code must not retain pointers after `mm_execute` returns
 - `error_buffer` is optional
 - All validation failures return `MM_INVALID_ARGUMENT`
@@ -327,7 +341,7 @@ MM_API mm_status MM_CALL mm_execute(
 
 - Load the executor DLL dynamically with `NativeLibrary.Load` from the current cached executor path
 - Bind `mm_execute` from the loaded DLL with `NativeLibrary.GetExport` and a managed function pointer or delegate
-- Build unmanaged arrays for module paths and environment variables for each call
+- Build unmanaged arrays for module paths, environment variables, and executor options for each call
 - Free unmanaged memory immediately after return
 - When a new executor revision becomes current, swap to it only between calls, then unload the old executor
 - Log `mm_status` and optional error text in managed code

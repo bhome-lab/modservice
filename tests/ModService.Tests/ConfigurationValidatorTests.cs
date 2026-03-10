@@ -9,7 +9,16 @@ public sealed class ConfigurationValidatorTests
     {
         var configuration = new ModServiceConfiguration
         {
-            Executor = new ExecutorConfiguration { Source = "mods", Asset = "injector.dll" },
+            Executor = new ExecutorConfiguration
+            {
+                Source = "mods",
+                Asset = "injector.dll",
+                Options =
+                [
+                    new ExecutorOptionConfiguration { Name = "mode", Value = "safe" },
+                    new ExecutorOptionConfiguration { Name = "mode", Value = "duplicate" }
+                ]
+            },
             Sources =
             [
                 new SourceConfiguration
@@ -31,5 +40,6 @@ public sealed class ConfigurationValidatorTests
 
         Assert.Contains(errors, error => error.Contains("empty pattern", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(errors, error => error.Contains("duplicate archive asset 'bundle.zip'", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(errors, error => error.Contains("duplicate option 'mode'", StringComparison.OrdinalIgnoreCase));
     }
 }

@@ -10,7 +10,13 @@
     },
     "executor": {
       "source": "core",
-      "asset": "injector.dll"
+      "asset": "injector.dll",
+      "options": [
+        {
+          "name": "mode",
+          "value": "safe-smoke"
+        }
+      ]
     },
     "sources": [
       {
@@ -29,6 +35,12 @@
             "include": [
               "*.dll"
             ]
+          }
+        ],
+        "executorOptions": [
+          {
+            "name": "profile",
+            "value": "main"
           }
         ],
         "passEnvironment": [

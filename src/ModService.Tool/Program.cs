@@ -120,6 +120,12 @@ internal sealed class ToolApplication
             Console.WriteLine($"- {variable.Name}={variable.Value}");
         }
 
+        Console.WriteLine("Executor options:");
+        foreach (var option in plan.ExecutorOptions)
+        {
+            Console.WriteLine($"- {option.Name}={option.Value}");
+        }
+
         return 0;
     }
 
@@ -149,6 +155,9 @@ internal sealed class ToolApplication
             ModulePaths = plan.ModulePaths,
             EnvironmentVariables = plan.EnvironmentVariables
                 .Select(item => new NativeEnvironmentVariable { Name = item.Name, Value = item.Value })
+                .ToArray(),
+            ExecutorOptions = plan.ExecutorOptions
+                .Select(item => new NativeExecutorOption { Name = item.Name, Value = item.Value })
                 .ToArray(),
             TimeoutMs = 1_000
         });

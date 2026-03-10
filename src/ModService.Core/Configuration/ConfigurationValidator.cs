@@ -85,6 +85,8 @@ public static class ConfigurationValidator
             errors.Add("Executor asset is required.");
         }
 
+        ValidateExecutorOptions("Executor options", configuration.Executor.Options, errors);
+
         for (var ruleIndex = 0; ruleIndex < configuration.Rules.Count; ruleIndex++)
         {
             var rule = configuration.Rules[ruleIndex];
@@ -108,6 +110,7 @@ public static class ConfigurationValidator
             }
 
             ValidateEnvironment(rule.Env, $"Rule {DescribeRule(rule, ruleIndex)}", errors);
+            ValidateExecutorOptions($"Rule {DescribeRule(rule, ruleIndex)} executorOptions", rule.ExecutorOptions, errors);
         }
 
         for (var excludeIndex = 0; excludeIndex < configuration.Excludes.Count; excludeIndex++)
@@ -149,6 +152,31 @@ public static class ConfigurationValidator
             if (string.IsNullOrWhiteSpace(pattern))
             {
                 errors.Add($"{owner} contains an empty pattern at index {index}.");
+            }
+        }
+    }
+
+    private static void ValidateExecutorOptions(string owner, IEnumerable<ExecutorOptionConfiguration> options, List<string> errors)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var index = 0;
+        foreach (var option in options)
+        {
+            index++;
+            if (string.IsNullOrWhiteSpace(option.Name))
+            {
+                errors.Add($"{owner} contains an option without a name at index {index}.");
+                continue;
+            }
+
+            if (!seen.Add(option.Name))
+            {
+                errors.Add($"{owner} contains duplicate option '{option.Name}'.");
+            }
+
+            if (option.Value is null)
+            {
+                errors.Add($"{owner} contains option '{option.Name}' with a null value.");
             }
         }
     }

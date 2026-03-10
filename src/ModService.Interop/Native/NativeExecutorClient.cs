@@ -25,6 +25,7 @@ public sealed class NativeExecutorClient : IDisposable
         var allocatedStrings = new List<IntPtr>();
         GCHandle? modulesHandle = null;
         GCHandle? envHandle = null;
+        GCHandle? optionsHandle = null;
         IntPtr errorBuffer = IntPtr.Zero;
 
         try
@@ -38,12 +39,22 @@ public sealed class NativeExecutorClient : IDisposable
                     Value = CreateView(item.Value, allocatedStrings)
                 })
                 .ToArray();
+            var optionEntries = request.ExecutorOptions
+                .Select(item => new MmOption
+                {
+                    Name = CreateView(item.Name, allocatedStrings),
+                    Value = CreateView(item.Value, allocatedStrings)
+                })
+                .ToArray();
 
             modulesHandle = moduleViews.Length > 0
                 ? GCHandle.Alloc(moduleViews, GCHandleType.Pinned)
                 : null;
             envHandle = envEntries.Length > 0
                 ? GCHandle.Alloc(envEntries, GCHandleType.Pinned)
+                : null;
+            optionsHandle = optionEntries.Length > 0
+                ? GCHandle.Alloc(optionEntries, GCHandleType.Pinned)
                 : null;
 
             var nativeRequest = new MmExecuteRequest
@@ -55,6 +66,8 @@ public sealed class NativeExecutorClient : IDisposable
                 ModuleCount = (uint)moduleViews.Length,
                 Environment = envHandle?.AddrOfPinnedObject() ?? IntPtr.Zero,
                 EnvironmentCount = (uint)envEntries.Length,
+                Options = optionsHandle?.AddrOfPinnedObject() ?? IntPtr.Zero,
+                OptionCount = (uint)optionEntries.Length,
                 TimeoutMs = request.TimeoutMs
             };
 
@@ -75,6 +88,11 @@ public sealed class NativeExecutorClient : IDisposable
             if (envHandle is { IsAllocated: true })
             {
                 envHandle.Value.Free();
+            }
+
+            if (optionsHandle is { IsAllocated: true })
+            {
+                optionsHandle.Value.Free();
             }
 
             foreach (var pointer in allocatedStrings)
@@ -141,6 +159,14 @@ public sealed class NativeExecutorClient : IDisposable
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct MmOption
+    {
+        public MmUtf16View Name;
+
+        public MmUtf16View Value;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct MmExecuteRequest
     {
         public uint ProcessId;
@@ -156,6 +182,10 @@ public sealed class NativeExecutorClient : IDisposable
         public IntPtr Environment;
 
         public uint EnvironmentCount;
+
+        public IntPtr Options;
+
+        public uint OptionCount;
 
         public uint TimeoutMs;
     }

@@ -29,12 +29,14 @@ public sealed class RuleResolver
 
             var resolvedModules = ResolveModules(rule, assets);
             var resolvedEnvironment = ResolveEnvironment(rule, snapshot);
+            var resolvedExecutorOptions = ResolveExecutorOptions(configuration.Executor, rule);
 
             return new ResolvedExecutionPlan
             {
                 RuleName = string.IsNullOrWhiteSpace(rule.Name) ? snapshot.ProcessName : rule.Name,
                 ModulePaths = resolvedModules,
-                EnvironmentVariables = resolvedEnvironment
+                EnvironmentVariables = resolvedEnvironment,
+                ExecutorOptions = resolvedExecutorOptions
             };
         }
 
@@ -137,6 +139,43 @@ public sealed class RuleResolver
         }
 
         return environment;
+    }
+
+    private static IReadOnlyList<ResolvedExecutorOption> ResolveExecutorOptions(
+        ExecutorConfiguration executor,
+        RuleConfiguration rule)
+    {
+        var options = new List<ResolvedExecutorOption>();
+        var indexes = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        ApplyOptions(executor.Options, options, indexes);
+        ApplyOptions(rule.ExecutorOptions, options, indexes);
+
+        return options;
+    }
+
+    private static void ApplyOptions(
+        IEnumerable<ExecutorOptionConfiguration> configuredOptions,
+        List<ResolvedExecutorOption> options,
+        Dictionary<string, int> indexes)
+    {
+        foreach (var configuredOption in configuredOptions)
+        {
+            var resolved = new ResolvedExecutorOption
+            {
+                Name = configuredOption.Name,
+                Value = configuredOption.Value
+            };
+
+            if (indexes.TryGetValue(configuredOption.Name, out var existingIndex))
+            {
+                options[existingIndex] = resolved;
+                continue;
+            }
+
+            indexes[configuredOption.Name] = options.Count;
+            options.Add(resolved);
+        }
     }
 
     private static bool MatchesAny(IEnumerable<string> patterns, string value, bool defaultIfEmpty)

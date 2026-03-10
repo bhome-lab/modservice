@@ -14,7 +14,16 @@ public sealed class RuleResolverTests
     {
         var configuration = new ModServiceConfiguration
         {
-            Executor = new ExecutorConfiguration { Source = "core", Asset = "injector.dll" },
+            Executor = new ExecutorConfiguration
+            {
+                Source = "core",
+                Asset = "injector.dll",
+                Options =
+                [
+                    new ExecutorOptionConfiguration { Name = "mode", Value = "safe" },
+                    new ExecutorOptionConfiguration { Name = "profile", Value = "global" }
+                ]
+            },
             Sources =
             [
                 new SourceConfiguration { Id = "core", Repo = "owner/core", Tag = "stable" },
@@ -28,6 +37,11 @@ public sealed class RuleResolverTests
                     Process = "game*.exe",
                     Env = [new EnvMatchCondition { Name = "MOD_PROFILE", Op = "equals", Value = "main" }],
                     PassEnvironment = ["MOD_PROFILE", "MISSING", "MOD_PROFILE"],
+                    ExecutorOptions =
+                    [
+                        new ExecutorOptionConfiguration { Name = "profile", Value = "main" },
+                        new ExecutorOptionConfiguration { Name = "log", Value = "verbose" }
+                    ],
                     Bindings =
                     [
                         new BindingConfiguration { Source = "core", Include = ["*.dll"] },
@@ -69,6 +83,23 @@ public sealed class RuleResolverTests
             {
                 Assert.Equal("MOD_PROFILE", variable.Name);
                 Assert.Equal("main", variable.Value);
+            });
+        Assert.Collection(
+            plan.ExecutorOptions,
+            option =>
+            {
+                Assert.Equal("mode", option.Name);
+                Assert.Equal("safe", option.Value);
+            },
+            option =>
+            {
+                Assert.Equal("profile", option.Name);
+                Assert.Equal("main", option.Value);
+            },
+            option =>
+            {
+                Assert.Equal("log", option.Name);
+                Assert.Equal("verbose", option.Value);
             });
     }
 

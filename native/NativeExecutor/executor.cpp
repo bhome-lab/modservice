@@ -113,6 +113,19 @@ bool save_and_set_environment(const mm_execute_request* request, std::vector<Sav
     return true;
 }
 
+bool validate_options(const mm_execute_request* request, std::wstring& error) {
+    for (uint32_t index = 0; index < request->option_count; ++index) {
+        const auto& item = request->options[index];
+        const auto name = to_wstring(item.name);
+        if (name.empty()) {
+            error = L"Executor option name cannot be empty.";
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void restore_environment(const std::vector<SavedEnvironmentVariable>& saved) {
     for (auto iterator = saved.rbegin(); iterator != saved.rend(); ++iterator) {
         if (iterator->existed) {
@@ -140,6 +153,16 @@ extern "C" mm_status MM_CALL mm_execute(
         return MM_INVALID_ARGUMENT;
     }
 
+    if (request->env_count > 0 && request->env == nullptr) {
+        write_error(L"Request environment pointer cannot be null when env_count is nonzero.", error_buffer, error_buffer_capacity, error_buffer_written);
+        return MM_INVALID_ARGUMENT;
+    }
+
+    if (request->option_count > 0 && request->options == nullptr) {
+        write_error(L"Request options pointer cannot be null when option_count is nonzero.", error_buffer, error_buffer_capacity, error_buffer_written);
+        return MM_INVALID_ARGUMENT;
+    }
+
     const DWORD current_pid = GetCurrentProcessId();
     if (request->pid != current_pid) {
         write_error(L"Safe test executor only supports the current process (local-only smoke path v4).", error_buffer, error_buffer_capacity, error_buffer_written);
@@ -152,8 +175,13 @@ extern "C" mm_status MM_CALL mm_execute(
         return MM_TARGET_CHANGED;
     }
 
-    std::vector<SavedEnvironmentVariable> saved_environment;
     std::wstring error;
+    if (!validate_options(request, error)) {
+        write_error(error, error_buffer, error_buffer_capacity, error_buffer_written);
+        return MM_INVALID_ARGUMENT;
+    }
+
+    std::vector<SavedEnvironmentVariable> saved_environment;
     if (!save_and_set_environment(request, saved_environment, error)) {
         restore_environment(saved_environment);
         write_error(error, error_buffer, error_buffer_capacity, error_buffer_written);

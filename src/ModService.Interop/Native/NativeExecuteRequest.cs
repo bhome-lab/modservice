@@ -12,10 +12,19 @@ public sealed class NativeExecuteRequest
 
     public required IReadOnlyList<NativeEnvironmentVariable> EnvironmentVariables { get; init; }
 
+    public required IReadOnlyList<NativeExecutorOption> ExecutorOptions { get; init; }
+
     public uint TimeoutMs { get; init; } = 1_000;
 }
 
 public sealed class NativeEnvironmentVariable
+{
+    public required string Name { get; init; }
+
+    public required string Value { get; init; }
+}
+
+public sealed class NativeExecutorOption
 {
     public required string Name { get; init; }
 

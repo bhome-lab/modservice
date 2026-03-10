@@ -13,7 +13,7 @@ internal static class NativeBuild
 
     private static bool BuildNative()
     {
-        if (File.Exists(RepoPaths.NativeExecutorDll) && File.Exists(RepoPaths.SampleModuleDll))
+        if (!ShouldBuildNative())
         {
             return true;
         }
@@ -41,5 +41,37 @@ internal static class NativeBuild
         }
 
         return true;
+    }
+
+    private static bool ShouldBuildNative()
+    {
+        if (!File.Exists(RepoPaths.NativeExecutorDll) || !File.Exists(RepoPaths.SampleModuleDll))
+        {
+            return true;
+        }
+
+        var outputTimestamp = new[]
+        {
+            File.GetLastWriteTimeUtc(RepoPaths.NativeExecutorDll),
+            File.GetLastWriteTimeUtc(RepoPaths.SampleModuleDll)
+        }.Min();
+
+        var nativeRoot = Path.Combine(RepoPaths.Root, "native");
+        var latestSourceTimestamp = Directory.EnumerateFiles(nativeRoot, "*", SearchOption.AllDirectories)
+            .Where(path =>
+            {
+                var extension = Path.GetExtension(path);
+                return extension.Equals(".cpp", StringComparison.OrdinalIgnoreCase) ||
+                       extension.Equals(".h", StringComparison.OrdinalIgnoreCase) ||
+                       extension.Equals(".hpp", StringComparison.OrdinalIgnoreCase) ||
+                       extension.Equals(".vcxproj", StringComparison.OrdinalIgnoreCase) ||
+                       extension.Equals(".props", StringComparison.OrdinalIgnoreCase) ||
+                       extension.Equals(".targets", StringComparison.OrdinalIgnoreCase);
+            })
+            .Select(File.GetLastWriteTimeUtc)
+            .DefaultIfEmpty(DateTime.MinValue)
+            .Max();
+
+        return latestSourceTimestamp >= outputTimestamp;
     }
 }

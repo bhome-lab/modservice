@@ -34,6 +34,8 @@ public sealed class ExecutorConfiguration
     public string Source { get; set; } = string.Empty;
 
     public string Asset { get; set; } = string.Empty;
+
+    public List<ExecutorOptionConfiguration> Options { get; set; } = [];
 }
 
 public sealed class SourceConfiguration
@@ -75,6 +77,8 @@ public sealed class RuleConfiguration : MatchCriteria
 
     public List<string> PassEnvironment { get; set; } = [];
 
+    public List<ExecutorOptionConfiguration> ExecutorOptions { get; set; } = [];
+
     public List<BindingConfiguration> Bindings { get; set; } = [];
 }
 
@@ -94,4 +98,11 @@ public sealed class EnvMatchCondition
     public string Op { get; set; } = "exists";
 
     public string? Value { get; set; }
+}
+
+public sealed class ExecutorOptionConfiguration
+{
+    public string Name { get; set; } = string.Empty;
+
+    public string Value { get; set; } = string.Empty;
 }

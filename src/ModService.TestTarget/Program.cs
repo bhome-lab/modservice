@@ -99,6 +99,12 @@ internal sealed class TestTargetApplication
                 Console.WriteLine($"- {environmentVariable.Name}={environmentVariable.Value}");
             }
 
+            Console.WriteLine("Executor options:");
+            foreach (var executorOption in plan.ExecutorOptions)
+            {
+                Console.WriteLine($"- {executorOption.Name}={executorOption.Value}");
+            }
+
             using var client = new NativeExecutorClient(executorPath);
             var result = client.Execute(new NativeExecuteRequest
             {
@@ -108,6 +114,9 @@ internal sealed class TestTargetApplication
                 ModulePaths = plan.ModulePaths,
                 EnvironmentVariables = environmentVariables
                     .Select(item => new NativeEnvironmentVariable { Name = item.Name, Value = item.Value })
+                    .ToArray(),
+                ExecutorOptions = plan.ExecutorOptions
+                    .Select(item => new NativeExecutorOption { Name = item.Name, Value = item.Value })
                     .ToArray(),
                 TimeoutMs = (uint)options.TimeoutMs
             });

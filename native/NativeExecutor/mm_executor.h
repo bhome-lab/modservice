@@ -33,6 +33,11 @@ typedef struct mm_env_var {
     mm_u16_view value;
 } mm_env_var;
 
+typedef struct mm_option {
+    mm_u16_view name;
+    mm_u16_view value;
+} mm_option;
+
 typedef struct mm_execute_request {
     uint32_t pid;
     uint64_t process_create_time_utc_100ns;
@@ -41,6 +46,8 @@ typedef struct mm_execute_request {
     uint32_t module_count;
     const mm_env_var* env;
     uint32_t env_count;
+    const mm_option* options;
+    uint32_t option_count;
     uint32_t timeout_ms;
 } mm_execute_request;
 
