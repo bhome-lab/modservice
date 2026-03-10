@@ -1,3 +1,7 @@
+using System.Threading.Channels;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using ModService.Core.Configuration;
 using ModService.Core.Updates;
 
 namespace ModService.Host;
@@ -5,61 +9,192 @@ namespace ModService.Host;
 public sealed class ModServiceWorker(
     EffectiveConfigurationStore configurationStore,
     SourceSyncService syncService,
-    ILogger<ModServiceWorker> logger) : BackgroundService
+    RuntimeStateStore runtimeState,
+    ILogger<ModServiceWorker> logger) : BackgroundService, IRefreshController
 {
+    private readonly Channel<RefreshRequest> _refreshQueue = Channel.CreateUnbounded<RefreshRequest>();
+    private int _queuedRefreshCount;
+
+    public void QueueRefresh(string reason)
+    {
+        var queuedRefreshCount = Interlocked.Increment(ref _queuedRefreshCount);
+        runtimeState.MarkRefreshQueued(reason, queuedRefreshCount);
+        _refreshQueue.Writer.TryWrite(new RefreshRequest(reason));
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await RunRefreshAsync("startup", stoppingToken);
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                if (configurationStore.TryGetCurrent(out var configuration))
+                var nextDelay = configurationStore.GetSyncDelay();
+                logger.LogInformation(
+                    "Next sync scheduled in {DelaySeconds} seconds.",
+                    (int)nextDelay.TotalSeconds);
+
+                using var manualRefreshCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                var scheduledRefreshTask = Task.Delay(nextDelay, stoppingToken);
+                var manualRefreshTask = _refreshQueue.Reader.ReadAsync(manualRefreshCts.Token).AsTask();
+
+                var completedTask = await Task.WhenAny(scheduledRefreshTask, manualRefreshTask);
+                if (completedTask == manualRefreshTask)
                 {
-                    await SyncOnceAsync(configuration, stoppingToken);
+                    var request = await manualRefreshTask;
+                    manualRefreshCts.Cancel();
+
+                    var remaining = Math.Max(0, Interlocked.Decrement(ref _queuedRefreshCount));
+                    runtimeState.SetQueuedRefreshCount(remaining);
+
+                    await RunRefreshAsync(request.Reason, stoppingToken);
+                    continue;
                 }
-                else
+
+                manualRefreshCts.Cancel();
+                try
                 {
-                    logger.LogWarning("Skipping sync because no valid configuration is available yet.");
+                    await manualRefreshTask;
                 }
+                catch (OperationCanceledException)
+                {
+                }
+
+                await RunRefreshAsync("scheduled", stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
                 break;
             }
-            catch (Exception exception)
+        }
+    }
+
+    private async Task RunRefreshAsync(string reason, CancellationToken cancellationToken)
+    {
+        runtimeState.MarkRefreshStarted(reason, Math.Max(0, Volatile.Read(ref _queuedRefreshCount)));
+
+        try
+        {
+            if (!configurationStore.TryGetCurrent(out var configuration))
             {
-                logger.LogError(exception, "Periodic sync failed.");
+                var configurationStatus = configurationStore.GetStatus();
+                var errorSummary = configurationStatus.ValidationErrors.Count == 0
+                    ? "No valid configuration is available."
+                    : string.Join(" | ", configurationStatus.ValidationErrors);
+
+                logger.LogWarning("Skipping sync because no valid configuration is available yet.");
+                runtimeState.MarkRefreshCompleted(
+                    reason,
+                    success: false,
+                    "Refresh skipped because the configuration is invalid.",
+                    errorSummary,
+                    executorPath: null,
+                    sources: [],
+                    cleanup: new CleanupStatusSnapshot());
+                return;
             }
 
-            var nextDelay = configurationStore.GetSyncDelay();
-            logger.LogInformation(
-                "Next sync scheduled in {DelaySeconds} seconds.",
-                (int)nextDelay.TotalSeconds);
-            await Task.Delay(nextDelay, stoppingToken);
-        }
-    }
+            var results = await syncService.SyncAsync(configuration, cancellationToken);
+            foreach (var result in results)
+            {
+                logger.LogInformation(
+                    "Synced source {SourceId}: {AssetCount} assets, downloaded [{DownloadedAssets}]",
+                    result.Manifest.SourceId,
+                    result.Manifest.CurrentAssets.Count,
+                    string.Join(", ", result.DownloadedAssets));
+            }
 
-    private async Task SyncOnceAsync(
-        ModService.Core.Configuration.ModServiceConfiguration configuration,
-        CancellationToken cancellationToken)
-    {
-        var results = await syncService.SyncAsync(configuration, cancellationToken);
-        foreach (var result in results)
+            var executorPath = TryResolveExecutorPath(configuration);
+            var cleanupResult = syncService.CleanupStaleFiles();
+            logger.LogInformation(
+                "Current executor path: {ExecutorPath}. Cleanup stale files: {StaleCount}, deleted={Deleted}, locked={LockedCount}.",
+                executorPath ?? "Unavailable",
+                cleanupResult.StaleFileCount,
+                cleanupResult.Deleted,
+                cleanupResult.LockedFiles.Count);
+
+            var sourceStatuses = BuildSourceStatuses(configuration);
+            var summary = BuildRefreshSummary(results, cleanupResult);
+            runtimeState.MarkRefreshCompleted(
+                reason,
+                success: true,
+                summary,
+                error: null,
+                executorPath,
+                sourceStatuses,
+                ToCleanupSnapshot(cleanupResult));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            logger.LogInformation(
-                "Synced source {SourceId}: {AssetCount} assets, downloaded [{DownloadedAssets}]",
-                result.Manifest.SourceId,
-                result.Manifest.CurrentAssets.Count,
-                string.Join(", ", result.DownloadedAssets));
+            throw;
         }
-
-        var executorPath = syncService.ResolveExecutorPath(configuration);
-        var cleanupResult = syncService.CleanupStaleFiles();
-        logger.LogInformation(
-            "Current executor path: {ExecutorPath}. Cleanup stale files: {StaleCount}, deleted={Deleted}, locked={LockedCount}.",
-            executorPath,
-            cleanupResult.StaleFileCount,
-            cleanupResult.Deleted,
-            cleanupResult.LockedFiles.Count);
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Refresh failed for reason {Reason}.", reason);
+            runtimeState.MarkRefreshCompleted(
+                reason,
+                success: false,
+                $"Refresh failed ({reason}).",
+                exception.Message,
+                executorPath: null,
+                sources: [],
+                cleanup: new CleanupStatusSnapshot());
+        }
     }
+
+    private IReadOnlyList<SourceStatusSnapshot> BuildSourceStatuses(ModServiceConfiguration configuration)
+    {
+        return configuration.Sources
+            .OrderBy(source => source.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(source =>
+            {
+                var manifest = syncService.LoadManifest(source.Id);
+                return manifest is null
+                    ? new SourceStatusSnapshot
+                    {
+                        SourceId = source.Id,
+                        Status = "No manifest available yet."
+                    }
+                    : new SourceStatusSnapshot
+                    {
+                        SourceId = source.Id,
+                        SyncedAtUtc = manifest.SyncedAtUtc,
+                        AssetCount = manifest.CurrentAssets.Count,
+                        Status = "Ready"
+                    };
+            })
+            .ToArray();
+    }
+
+    private static CleanupStatusSnapshot ToCleanupSnapshot(CleanupResult cleanupResult)
+    {
+        return new CleanupStatusSnapshot
+        {
+            StaleFileCount = cleanupResult.StaleFileCount,
+            LockedFileCount = cleanupResult.LockedFiles.Count,
+            Deleted = cleanupResult.Deleted
+        };
+    }
+
+    private static string BuildRefreshSummary(IReadOnlyList<SourceSyncResult> results, CleanupResult cleanupResult)
+    {
+        var downloadedAssets = results.Sum(result => result.DownloadedAssets.Count);
+        return $"Synced {results.Count} source(s), downloaded {downloadedAssets} asset(s), stale files {cleanupResult.StaleFileCount}, locked stale files {cleanupResult.LockedFiles.Count}.";
+    }
+
+    private string? TryResolveExecutorPath(ModServiceConfiguration configuration)
+    {
+        try
+        {
+            return syncService.ResolveExecutorPath(configuration);
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Executor path is not available after refresh.");
+            return null;
+        }
+    }
+
+    private sealed record RefreshRequest(string Reason);
 }

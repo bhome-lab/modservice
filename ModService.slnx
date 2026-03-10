@@ -7,6 +7,9 @@
     <Project Path="src/ModService.TestTarget/ModService.TestTarget.csproj" />
     <Project Path="src/ModService.Tool/ModService.Tool.csproj" />
   </Folder>
+  <Folder Name="/installer/">
+    <Project Path="installer/ModService.Setup/ModService.Setup.wixproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ModService.Tests/ModService.Tests.csproj" />
   </Folder>

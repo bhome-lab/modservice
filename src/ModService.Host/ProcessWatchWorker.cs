@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using ModService.Core.Configuration;
 using ModService.Core.Execution;
 using ModService.Core.Matching;
@@ -12,15 +14,16 @@ public sealed class ProcessWatchWorker(
     EffectiveConfigurationStore configurationStore,
     SourceSyncService syncService,
     RuleResolver resolver,
+    RuntimeStateStore runtimeState,
+    TrayPreferencesStore preferencesStore,
+    NotificationRequestQueue notificationQueue,
     ILogger<ProcessWatchWorker> logger) : BackgroundService
 {
-    private readonly HashSet<string> _observedProcesses = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
 
-    public override Task StartAsync(CancellationToken cancellationToken)
-    {
-        SeedObservedProcesses();
-        return base.StartAsync(cancellationToken);
-    }
+    private readonly HashSet<string> _observedProcesses = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTimeOffset> _retryAfter = new(StringComparer.OrdinalIgnoreCase);
+    private long _configurationVersion = -1;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -28,6 +31,8 @@ public sealed class ProcessWatchWorker(
         {
             try
             {
+                ResetStateIfConfigurationChanged();
+
                 if (configurationStore.TryGetCurrent(out var configuration))
                 {
                     ObserveProcesses(configuration);
@@ -35,6 +40,11 @@ public sealed class ProcessWatchWorker(
                 else
                 {
                     logger.LogWarning("Skipping process watch because no valid configuration is available yet.");
+                    runtimeState.MarkProcessScan(
+                        enabled: false,
+                        accessibleProcessCount: 0,
+                        inaccessibleProcessCount: 0,
+                        inaccessibleSummary: "No valid configuration is available.");
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -55,78 +65,102 @@ public sealed class ProcessWatchWorker(
     {
         if (!configuration.ProcessMonitoring.Enabled)
         {
+            runtimeState.MarkProcessScan(
+                enabled: false,
+                accessibleProcessCount: 0,
+                inaccessibleProcessCount: 0,
+                inaccessibleSummary: null);
             return;
         }
 
         var currentKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         IReadOnlyList<Core.Execution.SourceAsset>? assets = null;
         string? executorPath = null;
+        var inaccessibleProcessCount = 0;
+        string? inaccessibleSummary = null;
 
         foreach (var process in Process.GetProcesses())
         {
-            if (!TryCreateSnapshot(process, out var snapshot))
+            using (process)
             {
-                continue;
-            }
+                if (!TryCreateSnapshot(process, out var snapshot, out var failureReason))
+                {
+                    inaccessibleProcessCount++;
+                    inaccessibleSummary ??= failureReason;
+                    continue;
+                }
 
-            var key = CreateProcessKey(snapshot);
-            currentKeys.Add(key);
-            if (_observedProcesses.Contains(key))
-            {
-                continue;
-            }
+                var key = CreateProcessKey(snapshot);
+                currentKeys.Add(key);
+                if (_observedProcesses.Contains(key) || IsRetryDeferred(key))
+                {
+                    continue;
+                }
 
-            assets ??= syncService.LoadCurrentAssets();
-            var plan = resolver.Resolve(configuration, snapshot, assets);
-            if (plan is null)
-            {
-                _observedProcesses.Add(key);
-                continue;
-            }
+                assets ??= syncService.LoadCurrentAssets();
+                var plan = resolver.Resolve(configuration, snapshot, assets);
+                if (plan is null)
+                {
+                    _observedProcesses.Add(key);
+                    _retryAfter.Remove(key);
+                    continue;
+                }
 
-            if (plan.ModulePaths.Count == 0)
-            {
-                logger.LogWarning(
-                    "Matched process {ProcessName} (pid={Pid}) with rule {RuleName}, but no module paths are available yet.",
-                    snapshot.ProcessName,
-                    snapshot.ProcessId,
-                    plan.RuleName);
-                _observedProcesses.Add(key);
-                continue;
-            }
+                if (plan.ModulePaths.Count == 0)
+                {
+                    logger.LogWarning(
+                        "Matched process {ProcessName} (pid={Pid}) with rule {RuleName}, but no module paths are available yet.",
+                        snapshot.ProcessName,
+                        snapshot.ProcessId,
+                        plan.RuleName);
+                    ScheduleRetry(key);
+                    continue;
+                }
 
-            executorPath ??= TryResolveExecutorPath(configuration);
-            if (string.IsNullOrWhiteSpace(executorPath))
-            {
-                logger.LogWarning(
-                    "Matched process {ProcessName} (pid={Pid}) with rule {RuleName}, but the executor is not available yet.",
-                    snapshot.ProcessName,
-                    snapshot.ProcessId,
-                    plan.RuleName);
-                _observedProcesses.Add(key);
-                continue;
-            }
+                executorPath ??= TryResolveExecutorPath(configuration);
+                if (string.IsNullOrWhiteSpace(executorPath))
+                {
+                    logger.LogWarning(
+                        "Matched process {ProcessName} (pid={Pid}) with rule {RuleName}, but the executor is not available yet.",
+                        snapshot.ProcessName,
+                        snapshot.ProcessId,
+                        plan.RuleName);
+                    ScheduleRetry(key);
+                    continue;
+                }
 
-            TryExecute(snapshot, plan, executorPath);
-            _observedProcesses.Add(key);
+                if (TryExecute(snapshot, plan, executorPath))
+                {
+                    _observedProcesses.Add(key);
+                    _retryAfter.Remove(key);
+
+                    var summary = $"Processed {snapshot.ProcessName} (pid={snapshot.ProcessId}) with rule {plan.RuleName}.";
+                    runtimeState.MarkActivation(summary);
+                    if (preferencesStore.AreProcessNotificationsEnabled())
+                    {
+                        notificationQueue.Enqueue("ModService", summary);
+                    }
+                }
+                else
+                {
+                    ScheduleRetry(key);
+                    runtimeState.MarkActivation(
+                        $"Failed to process {snapshot.ProcessName} (pid={snapshot.ProcessId}) with rule {plan.RuleName}; retry scheduled.");
+                }
+            }
         }
 
         _observedProcesses.RemoveWhere(key => !currentKeys.Contains(key));
-    }
-
-    private void SeedObservedProcesses()
-    {
-        foreach (var process in Process.GetProcesses())
+        foreach (var key in _retryAfter.Keys.Where(key => !currentKeys.Contains(key)).ToArray())
         {
-            if (TryCreateProcessKey(process, out var key))
-            {
-                _observedProcesses.Add(key);
-            }
+            _retryAfter.Remove(key);
         }
 
-        logger.LogInformation(
-            "Process watcher seeded with {ProcessCount} running processes; existing processes will not be activated on startup.",
-            _observedProcesses.Count);
+        runtimeState.MarkProcessScan(
+            enabled: true,
+            accessibleProcessCount: currentKeys.Count,
+            inaccessibleProcessCount: inaccessibleProcessCount,
+            inaccessibleSummary: inaccessibleSummary);
     }
 
     private string? TryResolveExecutorPath(ModServiceConfiguration configuration)
@@ -198,24 +232,33 @@ public sealed class ProcessWatchWorker(
     private static string CreateProcessKey(ProcessSnapshot snapshot)
         => $"{snapshot.ProcessId}|{snapshot.ProcessCreateTimeUtc100ns}";
 
-    private static bool TryCreateProcessKey(Process process, out string key)
+    private void ResetStateIfConfigurationChanged()
     {
-        key = string.Empty;
+        var status = configurationStore.GetStatus();
+        if (status.Version == _configurationVersion)
+        {
+            return;
+        }
 
-        try
-        {
-            key = $"{process.Id}|{(ulong)process.StartTime.ToUniversalTime().ToFileTimeUtc()}";
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
+        _observedProcesses.Clear();
+        _retryAfter.Clear();
+        _configurationVersion = status.Version;
+        logger.LogInformation("Process watcher state reset for configuration version {Version}.", _configurationVersion);
     }
 
-    private static bool TryCreateSnapshot(Process process, out ProcessSnapshot snapshot)
+    private bool IsRetryDeferred(string key)
+    {
+        return _retryAfter.TryGetValue(key, out var retryAfter) &&
+               retryAfter > DateTimeOffset.UtcNow;
+    }
+
+    private void ScheduleRetry(string key)
+        => _retryAfter[key] = DateTimeOffset.UtcNow + RetryDelay;
+
+    private static bool TryCreateSnapshot(Process process, out ProcessSnapshot snapshot, out string? failureReason)
     {
         snapshot = null!;
+        failureReason = null;
 
         try
         {
@@ -235,8 +278,9 @@ public sealed class ProcessWatchWorker(
             };
             return true;
         }
-        catch
+        catch (Exception exception)
         {
+            failureReason = exception.Message;
             return false;
         }
     }

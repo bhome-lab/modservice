@@ -67,7 +67,7 @@ jobs:
 
       - name: Build release assets
         shell: pwsh
-        run: ./scripts/build-release-assets.ps1 -OutputRoot artifacts/release -RuntimeIdentifier win-x64
+        run: ./scripts/build-release-assets.ps1 -OutputRoot artifacts/release -RuntimeIdentifier win-x64 -InstallerVersion 1.0.${{ github.run_number }}
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

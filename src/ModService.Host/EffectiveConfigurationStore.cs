@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
 using ModService.Core.Configuration;
 using ModService.Core.Updates;
 
@@ -13,6 +14,9 @@ public sealed class EffectiveConfigurationStore : IDisposable
     private readonly ILogger<EffectiveConfigurationStore> _logger;
 
     private ModServiceConfiguration? _current;
+    private string[] _validationErrors = [];
+    private bool _usingLastKnownGoodConfiguration;
+    private long _version;
 
     public EffectiveConfigurationStore(
         IOptionsMonitor<ModServiceConfiguration> optionsMonitor,
@@ -61,11 +65,29 @@ public sealed class EffectiveConfigurationStore : IDisposable
     public void Dispose()
         => _subscription?.Dispose();
 
+    public ConfigurationStatusSnapshot GetStatus()
+    {
+        lock (_gate)
+        {
+            return new ConfigurationStatusSnapshot(
+                _version,
+                _current is not null,
+                _usingLastKnownGoodConfiguration,
+                _validationErrors.ToArray());
+        }
+    }
+
     private void ApplyCandidate(string reason, ModServiceConfiguration candidate)
     {
         var errors = ConfigurationValidator.Validate(candidate);
         if (errors.Count > 0)
         {
+            lock (_gate)
+            {
+                _validationErrors = errors.ToArray();
+                _usingLastKnownGoodConfiguration = _current is not null;
+            }
+
             if (TryGetCurrent(out _))
             {
                 _logger.LogWarning(
@@ -89,6 +111,9 @@ public sealed class EffectiveConfigurationStore : IDisposable
         lock (_gate)
         {
             _current = candidate;
+            _validationErrors = [];
+            _usingLastKnownGoodConfiguration = false;
+            _version++;
         }
 
         _logger.LogInformation(
@@ -102,3 +127,9 @@ public sealed class EffectiveConfigurationStore : IDisposable
             candidate.Polling.JitterSeconds);
     }
 }
+
+public sealed record ConfigurationStatusSnapshot(
+    long Version,
+    bool HasConfiguration,
+    bool UsingLastKnownGoodConfiguration,
+    IReadOnlyList<string> ValidationErrors);

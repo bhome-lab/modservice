@@ -1,6 +1,7 @@
 param(
     [string]$OutputRoot = 'artifacts/release',
-    [string]$RuntimeIdentifier = 'win-x64'
+    [string]$RuntimeIdentifier = 'win-x64',
+    [string]$InstallerVersion = '1.0.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,11 +51,11 @@ function Invoke-DotNetPublish {
     dotnet publish $ProjectPath `
         -c Release `
         -r $RuntimeIdentifier `
-        --self-contained false `
+        --self-contained true `
         -p:PublishSingleFile=true `
         -p:DebugSymbols=false `
         -p:DebugType=None `
-        -p:IncludeNativeLibrariesForSelfExtract=false `
+        -p:EnableCompressionInSingleFile=true `
         -o $PublishDirectory
 
     if ($LASTEXITCODE -ne 0) {
@@ -84,7 +85,7 @@ Invoke-Step -Description 'Build native Release assets' -Action {
 }
 
 $managedAssets = @(
-    @{ Name = 'ModService.Host'; Project = 'src/ModService.Host/ModService.Host.csproj' },
+    @{ Name = 'ModService.Host'; AssetName = 'ModService'; Project = 'src/ModService.Host/ModService.Host.csproj' },
     @{ Name = 'ModService.Tool'; Project = 'src/ModService.Tool/ModService.Tool.csproj' },
     @{ Name = 'ModService.TestTarget'; Project = 'src/ModService.TestTarget/ModService.TestTarget.csproj' }
 )
@@ -100,8 +101,38 @@ foreach ($managedAsset in $managedAssets) {
         throw "Expected single-file executable was not produced: $expectedExePath"
     }
 
-    Copy-Item $expectedExePath (Join-Path $assetsRoot ($managedAsset.Name + '-' + $RuntimeIdentifier + '.exe')) -Force
+    $assetName = if ($managedAsset.ContainsKey('AssetName')) {
+        $managedAsset.AssetName
+    } else {
+        $managedAsset.Name
+    }
+
+    Copy-Item $expectedExePath (Join-Path $assetsRoot ($assetName + '-' + $RuntimeIdentifier + '.exe')) -Force
 }
+
+$installerOutputDirectory = Join-Path $workRoot 'installer'
+$hostPublishDirectory = Join-Path $workRoot 'ModService.Host'
+$configSourcePath = Join-Path $repoRoot 'src/ModService.Host/modservice.json'
+Invoke-Step -Description 'Build MSI installer' -Action {
+    dotnet build (Join-Path $repoRoot 'installer/ModService.Setup/ModService.Setup.wixproj') `
+        -c Release `
+        -o $installerOutputDirectory `
+        -p:PublishDir=$hostPublishDirectory `
+        -p:ConfigSource=$configSourcePath `
+        -p:ProductVersion=$InstallerVersion `
+        -p:OutputName='ModService-win-x64'
+
+    if ($LASTEXITCODE -ne 0) {
+        throw 'MSI build failed.'
+    }
+}
+
+$installerPath = Join-Path $installerOutputDirectory 'ModService-win-x64.msi'
+if (-not (Test-Path $installerPath)) {
+    throw "Expected MSI was not produced: $installerPath"
+}
+
+Copy-Item $installerPath (Join-Path $assetsRoot 'ModService-win-x64.msi') -Force
 
 $nativeAssets = @(
     (Join-Path $repoRoot 'artifacts/native/NativeExecutor/x64/Release/NativeExecutor.dll'),

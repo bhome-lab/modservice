@@ -40,6 +40,36 @@ public sealed class EffectiveConfigurationStoreTests
         Assert.Equal(45, effective.Polling.IntervalSeconds);
     }
 
+    [Fact]
+    public void Status_TracksValidationErrors_AndVersion()
+    {
+        var initial = CreateValidConfiguration(intervalSeconds: 30);
+        var monitor = new TestOptionsMonitor(initial);
+
+        using var store = new EffectiveConfigurationStore(monitor, NullLogger<EffectiveConfigurationStore>.Instance);
+        var initialStatus = store.GetStatus();
+        Assert.True(initialStatus.HasConfiguration);
+        Assert.False(initialStatus.UsingLastKnownGoodConfiguration);
+        Assert.Empty(initialStatus.ValidationErrors);
+        Assert.Equal(1, initialStatus.Version);
+
+        monitor.Set(CreateValidConfiguration(intervalSeconds: 0));
+
+        var invalidStatus = store.GetStatus();
+        Assert.True(invalidStatus.HasConfiguration);
+        Assert.True(invalidStatus.UsingLastKnownGoodConfiguration);
+        Assert.NotEmpty(invalidStatus.ValidationErrors);
+        Assert.Equal(1, invalidStatus.Version);
+
+        monitor.Set(CreateValidConfiguration(intervalSeconds: 60));
+
+        var reloadedStatus = store.GetStatus();
+        Assert.True(reloadedStatus.HasConfiguration);
+        Assert.False(reloadedStatus.UsingLastKnownGoodConfiguration);
+        Assert.Empty(reloadedStatus.ValidationErrors);
+        Assert.Equal(2, reloadedStatus.Version);
+    }
+
     private static ModServiceConfiguration CreateValidConfiguration(int intervalSeconds)
     {
         return new ModServiceConfiguration
