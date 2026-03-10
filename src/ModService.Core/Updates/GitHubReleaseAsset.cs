@@ -2,7 +2,7 @@ namespace ModService.Core.Updates;
 
 public sealed class GitHubReleaseAsset
 {
-    public required long Id { get; init; }
+    public required string Id { get; init; }
 
     public required string Name { get; init; }
 

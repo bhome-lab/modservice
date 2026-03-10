@@ -128,7 +128,7 @@ public sealed class SourceSyncServiceTests : IDisposable
             var assets = sourceAssets.Values
                 .Select(asset => new GitHubReleaseAsset
                 {
-                    Id = asset.Id,
+                    Id = asset.Id.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     Name = asset.Name,
                     Size = Encoding.UTF8.GetByteCount(asset.Content),
                     UpdatedAt = asset.UpdatedAt

@@ -15,7 +15,7 @@ public sealed class SourceManifest
 
 public sealed class CurrentAssetRecord
 {
-    public required long Id { get; init; }
+    public required string Id { get; init; }
 
     public required string AssetName { get; init; }
 

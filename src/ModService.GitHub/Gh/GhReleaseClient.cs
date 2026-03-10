@@ -21,7 +21,7 @@ public sealed class GhReleaseClient : IGitHubReleaseClient
         {
             assets.Add(new GitHubReleaseAsset
             {
-                Id = asset.GetProperty("id").GetInt64(),
+                Id = asset.GetProperty("id").GetString() ?? string.Empty,
                 Name = asset.GetProperty("name").GetString() ?? string.Empty,
                 Size = asset.GetProperty("size").GetInt64(),
                 UpdatedAt = asset.GetProperty("updatedAt").GetDateTimeOffset()

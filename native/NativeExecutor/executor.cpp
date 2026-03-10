@@ -142,7 +142,7 @@ extern "C" mm_status MM_CALL mm_execute(
 
     const DWORD current_pid = GetCurrentProcessId();
     if (request->pid != current_pid) {
-        write_error(L"Safe test executor only supports the current process.", error_buffer, error_buffer_capacity, error_buffer_written);
+        write_error(L"Safe test executor only supports the current process (local-only smoke path).", error_buffer, error_buffer_capacity, error_buffer_written);
         return MM_TARGET_NOT_FOUND;
     }
 
