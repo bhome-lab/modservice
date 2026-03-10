@@ -4,12 +4,13 @@ on:
   push:
     tags:
       - 'v*'
-      - 'prototype-*'
+      - 'r*'
   workflow_dispatch:
     inputs:
       tag:
         description: Release tag to create or update.
-        required: true
+        required: false
+        default: ''
         type: string
       target:
         description: Git ref to build when creating a release from workflow_dispatch.
@@ -19,7 +20,7 @@ on:
       prerelease:
         description: Mark the GitHub release as a prerelease.
         required: false
-        default: true
+        default: false
         type: boolean
 
 permissions:
@@ -28,10 +29,6 @@ permissions:
 jobs:
   build-release:
     runs-on: windows-latest
-    env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-      RELEASE_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || github.sha }}
-      RELEASE_PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || 'false' }}
 
     steps:
       - name: Checkout
@@ -47,6 +44,27 @@ jobs:
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
+
+      - name: Resolve release metadata
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $tag = '${{ inputs.tag }}'
+            if ([string]::IsNullOrWhiteSpace($tag)) {
+              $tag = "r$env:GITHUB_RUN_NUMBER"
+            }
+
+            $target = '${{ inputs.target }}'
+            $prerelease = '${{ inputs.prerelease }}'
+          } else {
+            $tag = $env:GITHUB_REF_NAME
+            $target = $env:GITHUB_SHA
+            $prerelease = 'false'
+          }
+
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RELEASE_TARGET=$target" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RELEASE_PRERELEASE=$prerelease" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build release assets
         shell: pwsh
