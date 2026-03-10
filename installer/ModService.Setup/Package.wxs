@@ -27,7 +27,8 @@
           Guid="*"
           Bitness="always64"
           Permanent="yes"
-          NeverOverwrite="yes">
+          NeverOverwrite="yes"
+          Condition="NOT Installed">
           <File
             Id="ConfigFile"
             Source="$(var.ConfigSource)"
