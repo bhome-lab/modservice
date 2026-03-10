@@ -25,7 +25,7 @@ void append_line(const wchar_t* line) {
 }  // namespace
 
 extern "C" __declspec(dllexport) int SampleModuleTouch() {
-    return 43;
+    return 45;
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
@@ -34,7 +34,7 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
         if (GetEnvironmentVariableW(L"MODSERVICE_SAMPLE_MARKER", marker, 256) > 0) {
             append_line(marker);
         } else {
-            append_line(L"missing-marker-v2");
+            append_line(L"missing-marker-v4");
         }
     }
 

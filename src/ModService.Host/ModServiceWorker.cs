@@ -22,9 +22,10 @@ public sealed class ModServiceWorker(
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            var configuration = optionsMonitor.CurrentValue;
             try
             {
-                await SyncOnceAsync(stoppingToken);
+                await SyncOnceAsync(configuration, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -35,7 +36,13 @@ public sealed class ModServiceWorker(
                 logger.LogError(exception, "Periodic sync failed.");
             }
 
-            await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+            var nextDelay = PollingDelayCalculator.ComputeNextDelay(configuration.Polling);
+            logger.LogInformation(
+                "Next sync scheduled in {DelaySeconds} seconds (interval={IntervalSeconds}, jitter={JitterSeconds}).",
+                (int)nextDelay.TotalSeconds,
+                configuration.Polling.IntervalSeconds,
+                configuration.Polling.JitterSeconds);
+            await Task.Delay(nextDelay, stoppingToken);
         }
     }
 
@@ -60,17 +67,18 @@ public sealed class ModServiceWorker(
         }
 
         logger.LogInformation(
-            "Configuration {Reason}: executor {ExecutorSource}/{ExecutorAsset}, {SourceCount} sources, {RuleCount} rules.",
+            "Configuration {Reason}: executor {ExecutorSource}/{ExecutorAsset}, {SourceCount} sources, {RuleCount} rules, polling {IntervalSeconds}s+{JitterSeconds}s jitter.",
             reason,
             configuration.Executor.Source,
             configuration.Executor.Asset,
             configuration.Sources.Count,
-            configuration.Rules.Count);
+            configuration.Rules.Count,
+            configuration.Polling.IntervalSeconds,
+            configuration.Polling.JitterSeconds);
     }
 
-    private async Task SyncOnceAsync(CancellationToken cancellationToken)
+    private async Task SyncOnceAsync(ModServiceConfiguration configuration, CancellationToken cancellationToken)
     {
-        var configuration = optionsMonitor.CurrentValue;
         var errors = ConfigurationValidator.Validate(configuration);
         if (errors.Count > 0)
         {

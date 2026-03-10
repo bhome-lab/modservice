@@ -11,6 +11,16 @@ public static class ConfigurationValidator
         var errors = new List<string>();
         var sources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        if (configuration.Polling.IntervalSeconds <= 0)
+        {
+            errors.Add("Polling intervalSeconds must be greater than zero.");
+        }
+
+        if (configuration.Polling.JitterSeconds < 0)
+        {
+            errors.Add("Polling jitterSeconds cannot be negative.");
+        }
+
         foreach (var source in configuration.Sources)
         {
             if (string.IsNullOrWhiteSpace(source.Id))

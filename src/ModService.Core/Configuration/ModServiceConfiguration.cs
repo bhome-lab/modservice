@@ -2,6 +2,8 @@ namespace ModService.Core.Configuration;
 
 public sealed class ModServiceConfiguration
 {
+    public PollingConfiguration Polling { get; set; } = new();
+
     public ExecutorConfiguration Executor { get; set; } = new();
 
     public List<SourceConfiguration> Sources { get; set; } = [];
@@ -9,6 +11,13 @@ public sealed class ModServiceConfiguration
     public List<MatchCriteria> Excludes { get; set; } = [];
 
     public List<RuleConfiguration> Rules { get; set; } = [];
+}
+
+public sealed class PollingConfiguration
+{
+    public int IntervalSeconds { get; set; } = 300;
+
+    public int JitterSeconds { get; set; } = 30;
 }
 
 public sealed class ExecutorConfiguration
