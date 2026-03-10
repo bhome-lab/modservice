@@ -1,19 +1,34 @@
 using System.Diagnostics;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using ModService.Core.Configuration;
 using ModService.Core.Updates;
+using ModService.GitHub.Auth;
 
 namespace ModService.GitHub.Gh;
 
+[SupportedOSPlatform("windows")]
 public sealed class GhReleaseClient : IGitHubReleaseClient
 {
+    private readonly GitHubTokenStore? _tokenStore;
+
+    public GhReleaseClient()
+    {
+    }
+
+    public GhReleaseClient(GitHubTokenStore tokenStore)
+    {
+        _tokenStore = tokenStore;
+    }
+
     public async Task<IReadOnlyList<GitHubReleaseAsset>> GetReleaseAssetsAsync(SourceConfiguration source, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(source);
 
         var result = await RunGhAsync(
             $"release view {Quote(source.Tag)} --repo {Quote(source.Repo)} --json assets",
-            cancellationToken);
+            cancellationToken,
+            _tokenStore);
 
         var document = JsonDocument.Parse(result.StandardOutput);
         var assets = new List<GitHubReleaseAsset>();
@@ -45,7 +60,8 @@ public sealed class GhReleaseClient : IGitHubReleaseClient
 
         await RunGhAsync(
             $"release download {Quote(source.Tag)} --repo {Quote(source.Repo)} --pattern {Quote(asset.Name)} --dir {Quote(destinationDirectory)} --clobber",
-            cancellationToken);
+            cancellationToken,
+            _tokenStore);
 
         var filePath = Path.Combine(destinationDirectory, asset.Name);
         if (!File.Exists(filePath))
@@ -56,7 +72,7 @@ public sealed class GhReleaseClient : IGitHubReleaseClient
         return filePath;
     }
 
-    private static async Task<GhCommandResult> RunGhAsync(string arguments, CancellationToken cancellationToken)
+    private static async Task<GhCommandResult> RunGhAsync(string arguments, CancellationToken cancellationToken, GitHubTokenStore? tokenStore = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -67,6 +83,15 @@ public sealed class GhReleaseClient : IGitHubReleaseClient
             UseShellExecute = false,
             CreateNoWindow = true
         };
+
+        startInfo.Environment["GH_PROMPT_DISABLED"] = "1";
+        startInfo.Environment["GH_NO_UPDATE_NOTIFIER"] = "1";
+
+        var token = tokenStore?.TryLoadToken();
+        if (!string.IsNullOrWhiteSpace(token))
+        {
+            startInfo.Environment["GH_TOKEN"] = token;
+        }
 
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start gh process.");
         var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);

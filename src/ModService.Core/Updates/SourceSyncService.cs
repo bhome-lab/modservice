@@ -169,6 +169,29 @@ public sealed class SourceSyncService
 
     public CleanupResult CleanupStaleFiles()
     {
+        var status = GetCleanupStatus();
+        if (status.StaleFileCount == 0 || status.LockedFiles.Count > 0)
+        {
+            return status;
+        }
+
+        foreach (var staleFile in status.StaleFiles)
+        {
+            File.Delete(staleFile);
+            PruneEmptyDirectories(Path.GetDirectoryName(staleFile));
+        }
+
+        return new CleanupResult
+        {
+            StaleFileCount = status.StaleFileCount,
+            Deleted = true,
+            LockedFiles = [],
+            StaleFiles = status.StaleFiles
+        };
+    }
+
+    public CleanupResult GetCleanupStatus()
+    {
         Directory.CreateDirectory(_layout.SourcesDirectory);
         Directory.CreateDirectory(_layout.ManifestsDirectory);
 
@@ -188,32 +211,18 @@ public sealed class SourceSyncService
             {
                 StaleFileCount = 0,
                 Deleted = false,
-                LockedFiles = []
+                LockedFiles = [],
+                StaleFiles = []
             };
         }
 
         var lockedFiles = staleFiles.Where(FileLockProbe.IsLocked).ToList();
-        if (lockedFiles.Count > 0)
-        {
-            return new CleanupResult
-            {
-                StaleFileCount = staleFiles.Count,
-                Deleted = false,
-                LockedFiles = lockedFiles
-            };
-        }
-
-        foreach (var staleFile in staleFiles)
-        {
-            File.Delete(staleFile);
-            PruneEmptyDirectories(Path.GetDirectoryName(staleFile));
-        }
-
         return new CleanupResult
         {
             StaleFileCount = staleFiles.Count,
-            Deleted = true,
-            LockedFiles = []
+            Deleted = false,
+            LockedFiles = lockedFiles,
+            StaleFiles = staleFiles
         };
     }
 
@@ -232,7 +241,9 @@ public sealed class SourceSyncService
     {
         var path = _layout.GetManifestPath(manifest.SourceId);
         var json = JsonSerializer.Serialize(manifest, JsonOptions);
-        await File.WriteAllTextAsync(path, json, cancellationToken);
+        var tempPath = path + ".tmp";
+        await File.WriteAllTextAsync(tempPath, json, cancellationToken);
+        File.Move(tempPath, path, overwrite: true);
     }
 
     private static void PruneEmptyDirectories(string? startDirectory)

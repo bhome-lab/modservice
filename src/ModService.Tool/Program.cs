@@ -4,6 +4,7 @@ using ModService.Core.Configuration;
 using ModService.Core.Matching;
 using ModService.Core.Processes;
 using ModService.Core.Updates;
+using ModService.GitHub.Auth;
 using ModService.GitHub.Gh;
 using ModService.Interop.Native;
 
@@ -38,6 +39,10 @@ internal sealed class ToolApplication
                 "resolve" => Resolve(options),
                 "smoke-test" => await SmokeTestAsync(options, CancellationToken.None),
                 "cleanup" => Cleanup(options),
+                "status" => Status(options),
+                "token-status" => TokenStatus(options),
+                "set-token" => await SetTokenAsync(options, CancellationToken.None),
+                "clear-token" => ClearToken(options),
                 _ => Unknown(command)
             };
         }
@@ -69,7 +74,7 @@ internal sealed class ToolApplication
     private async Task<int> SyncAsync(CommandOptions options, CancellationToken cancellationToken)
     {
         var configuration = LoadConfiguration(options.ConfigPath);
-        var syncService = CreateSyncService(options.CacheRoot);
+        var syncService = CreateSyncService(options);
         var results = await syncService.SyncAsync(configuration, cancellationToken);
         foreach (var result in results)
         {
@@ -83,7 +88,7 @@ internal sealed class ToolApplication
     private int ShowExecutorPath(CommandOptions options)
     {
         var configuration = LoadConfiguration(options.ConfigPath);
-        var syncService = CreateSyncService(options.CacheRoot);
+        var syncService = CreateSyncService(options);
         Console.WriteLine(syncService.ResolveExecutorPath(configuration));
         return 0;
     }
@@ -91,7 +96,7 @@ internal sealed class ToolApplication
     private int Resolve(CommandOptions options)
     {
         var configuration = LoadConfiguration(options.ConfigPath);
-        var syncService = CreateSyncService(options.CacheRoot);
+        var syncService = CreateSyncService(options);
         var snapshot = BuildSnapshot(options);
         var resolver = new RuleResolver();
         var plan = resolver.Resolve(configuration, snapshot, syncService.LoadCurrentAssets());
@@ -121,7 +126,7 @@ internal sealed class ToolApplication
     private async Task<int> SmokeTestAsync(CommandOptions options, CancellationToken cancellationToken)
     {
         var configuration = LoadConfiguration(options.ConfigPath);
-        var syncService = CreateSyncService(options.CacheRoot);
+        var syncService = CreateSyncService(options);
         await syncService.SyncAsync(configuration, cancellationToken);
 
         var snapshot = BuildSnapshot(options);
@@ -159,15 +164,82 @@ internal sealed class ToolApplication
 
     private int Cleanup(CommandOptions options)
     {
-        var result = CreateSyncService(options.CacheRoot).CleanupStaleFiles();
+        var result = CreateSyncService(options).CleanupStaleFiles();
+        PrintCleanupResult(result);
+        return result.LockedFiles.Count == 0 ? 0 : 3;
+    }
+
+    private int Status(CommandOptions options)
+    {
+        var tokenStore = CreateTokenStore(options);
+        var syncService = CreateSyncService(options, tokenStore);
+        var configuration = LoadConfiguration(options.ConfigPath);
+        var cleanup = syncService.GetCleanupStatus();
+
+        Console.WriteLine($"Token store: {tokenStore.FilePath}");
+        Console.WriteLine($"Token present: {tokenStore.HasToken()}");
+        Console.WriteLine($"Polling: {configuration.Polling.IntervalSeconds}s + up to {configuration.Polling.JitterSeconds}s jitter");
+        Console.WriteLine($"Process monitoring: enabled={configuration.ProcessMonitoring.Enabled}, scan={configuration.ProcessMonitoring.ScanIntervalSeconds}s");
+
+        foreach (var source in configuration.Sources)
+        {
+            var manifest = syncService.LoadManifest(source.Id);
+            if (manifest is null)
+            {
+                Console.WriteLine($"Source {source.Id}: no manifest");
+                continue;
+            }
+
+            Console.WriteLine($"Source {source.Id}: synced {manifest.SyncedAtUtc:O}, assets={manifest.CurrentAssets.Count}");
+        }
+
+        var executorManifest = syncService.LoadManifest(configuration.Executor.Source);
+        var executorAsset = executorManifest?.CurrentAssets.FirstOrDefault(asset =>
+            string.Equals(asset.AssetName, configuration.Executor.Asset, StringComparison.OrdinalIgnoreCase));
+        if (executorAsset is not null)
+        {
+            Console.WriteLine($"Executor path: {executorAsset.FullPath}");
+            Console.WriteLine($"Executor sha256: {executorAsset.Sha256}");
+        }
+
+        PrintCleanupResult(cleanup);
+        return 0;
+    }
+
+    private int TokenStatus(CommandOptions options)
+    {
+        var tokenStore = CreateTokenStore(options);
+        Console.WriteLine($"Token store: {tokenStore.FilePath}");
+        Console.WriteLine($"Token present: {tokenStore.HasToken()}");
+        return tokenStore.HasToken() ? 0 : 2;
+    }
+
+    private async Task<int> SetTokenAsync(CommandOptions options, CancellationToken cancellationToken)
+    {
+        var token = await GetRequestedTokenAsync(options, cancellationToken);
+        var tokenStore = CreateTokenStore(options);
+        await tokenStore.SaveAsync(token, cancellationToken);
+        Console.WriteLine($"Saved GitHub token to {tokenStore.FilePath}");
+        return 0;
+    }
+
+    private int ClearToken(CommandOptions options)
+    {
+        var tokenStore = CreateTokenStore(options);
+        tokenStore.Clear();
+        Console.WriteLine($"Cleared GitHub token from {tokenStore.FilePath}");
+        return 0;
+    }
+
+    private static void PrintCleanupResult(CleanupResult result)
+    {
         Console.WriteLine($"Stale files: {result.StaleFileCount}");
         Console.WriteLine($"Deleted: {result.Deleted}");
+        Console.WriteLine($"Locked stale files: {result.LockedFiles.Count}");
         foreach (var lockedFile in result.LockedFiles)
         {
             Console.WriteLine($"Locked: {lockedFile}");
         }
-
-        return result.LockedFiles.Count == 0 ? 0 : 3;
     }
 
     private static ProcessSnapshot BuildSnapshot(CommandOptions options)
@@ -212,8 +284,63 @@ internal sealed class ToolApplication
         return root.Deserialize<ModServiceConfiguration>(JsonOptions) ?? new ModServiceConfiguration();
     }
 
-    private static SourceSyncService CreateSyncService(string cacheRoot)
-        => new(new StorageLayout(cacheRoot), new GhReleaseClient());
+    private static SourceSyncService CreateSyncService(CommandOptions options)
+        => CreateSyncService(options, CreateTokenStore(options));
+
+    private static SourceSyncService CreateSyncService(CommandOptions options, GitHubTokenStore tokenStore)
+        => new(new StorageLayout(options.CacheRoot), new GhReleaseClient(tokenStore));
+
+    private static GitHubTokenStore CreateTokenStore(CommandOptions options)
+        => new(options.TokenStorePath);
+
+    private static async Task<string> GetRequestedTokenAsync(CommandOptions options, CancellationToken cancellationToken)
+    {
+        var directValue = options.GetValue("--value");
+        if (!string.IsNullOrWhiteSpace(directValue))
+        {
+            return directValue.Trim();
+        }
+
+        if (options.HasFlag("--from-gh"))
+        {
+            return (await RunGhAsync("auth token", cancellationToken)).Trim();
+        }
+
+        if (Console.IsInputRedirected)
+        {
+            return (await Console.In.ReadToEndAsync(cancellationToken)).Trim();
+        }
+
+        throw new InvalidOperationException("Provide --value TOKEN, --from-gh, or pipe the token through stdin.");
+    }
+
+    private static async Task<string> RunGhAsync(string arguments, CancellationToken cancellationToken)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "gh",
+            Arguments = arguments,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        startInfo.Environment["GH_PROMPT_DISABLED"] = "1";
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start gh.");
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken);
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"gh {arguments} failed with exit code {process.ExitCode}:{Environment.NewLine}{stderr}");
+        }
+
+        return stdout;
+    }
 
     private static int Unknown(string command)
     {
@@ -226,10 +353,14 @@ internal sealed class ToolApplication
     {
         Console.WriteLine("Commands:");
         Console.WriteLine("  validate [--config path]");
-        Console.WriteLine("  sync [--config path] [--cache path]");
-        Console.WriteLine("  executor-path [--config path] [--cache path]");
+        Console.WriteLine("  sync [--config path] [--cache path] [--token-store path]");
+        Console.WriteLine("  status [--config path] [--cache path] [--token-store path]");
+        Console.WriteLine("  token-status [--token-store path]");
+        Console.WriteLine("  set-token [--token-store path] [--value token | --from-gh]");
+        Console.WriteLine("  clear-token [--token-store path]");
+        Console.WriteLine("  executor-path [--config path] [--cache path] [--token-store path]");
         Console.WriteLine("  resolve [--config path] [--cache path] [--process-name name] [--exe-path path] [--env NAME=VALUE]");
-        Console.WriteLine("  smoke-test [--config path] [--cache path] [--process-name name] [--exe-path path] [--env NAME=VALUE]");
+        Console.WriteLine("  smoke-test [--config path] [--cache path] [--token-store path] [--process-name name] [--exe-path path] [--env NAME=VALUE]");
         Console.WriteLine("  cleanup [--cache path]");
     }
 
@@ -240,6 +371,9 @@ internal sealed class ToolApplication
         public string ConfigPath => GetValue("--config") ?? Path.Combine(Environment.CurrentDirectory, "src", "ModService.Host", "modservice.json");
 
         public string CacheRoot => GetValue("--cache") ?? Path.Combine(Environment.CurrentDirectory, "artifacts", "cache");
+
+        public string TokenStorePath => GetValue("--token-store")
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ModService", "secrets", "github-token.bin");
 
         public IReadOnlyList<string> EnvironmentOverrides => GetValues("--env");
 
@@ -254,16 +388,21 @@ internal sealed class ToolApplication
                     continue;
                 }
 
-                if (index + 1 >= args.Length)
+                if (index + 1 < args.Length && !args[index + 1].StartsWith("--", StringComparison.Ordinal))
                 {
-                    throw new InvalidOperationException($"Missing value for {key}.");
+                    options.Add(key, args[++index]);
                 }
-
-                options.Add(key, args[++index]);
+                else
+                {
+                    options.Add(key, bool.TrueString);
+                }
             }
 
             return options;
         }
+
+        public bool HasFlag(string key)
+            => _values.ContainsKey(key);
 
         public string? GetValue(string key)
             => _values.TryGetValue(key, out var values) ? values[^1] : null;

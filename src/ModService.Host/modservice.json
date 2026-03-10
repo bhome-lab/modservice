@@ -4,6 +4,10 @@
       "intervalSeconds": 300,
       "jitterSeconds": 30
     },
+    "processMonitoring": {
+      "enabled": true,
+      "scanIntervalSeconds": 2
+    },
     "executor": {
       "source": "core",
       "asset": "injector.dll"

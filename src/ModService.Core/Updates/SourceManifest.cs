@@ -42,4 +42,6 @@ public sealed class CleanupResult
     public required bool Deleted { get; init; }
 
     public required IReadOnlyList<string> LockedFiles { get; init; }
+
+    public required IReadOnlyList<string> StaleFiles { get; init; }
 }

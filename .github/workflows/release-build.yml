@@ -1,0 +1,109 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'prototype-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create or update.
+        required: true
+        type: string
+      target:
+        description: Git ref to build when creating a release from workflow_dispatch.
+        required: true
+        default: main
+        type: string
+      prerelease:
+        description: Mark the GitHub release as a prerelease.
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || github.sha }}
+      RELEASE_PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || 'false' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target || github.ref }}
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build release assets
+        shell: pwsh
+        run: ./scripts/build-release-assets.ps1 -OutputRoot artifacts/release -RuntimeIdentifier win-x64
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ env.RELEASE_TAG }}
+          path: artifacts/release/assets/*
+          if-no-files-found: error
+
+      - name: Create or update GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $repo = $env:GITHUB_REPOSITORY
+
+          & gh release view $tag --repo $repo --json tagName 2>$null
+          if ($LASTEXITCODE -ne 0) {
+              $arguments = @(
+                  'release', 'create', $tag,
+                  '--repo', $repo,
+                  '--title', $tag,
+                  '--notes', 'Automated release build.'
+              )
+
+              if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+                  $arguments += @('--target', $env:RELEASE_TARGET)
+              }
+
+              if ($env:RELEASE_PRERELEASE -eq 'true') {
+                  $arguments += '--prerelease'
+              }
+
+              & gh @arguments
+              if ($LASTEXITCODE -ne 0) {
+                  throw "gh release create failed for $tag"
+              }
+          }
+
+      - name: Upload release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $repo = $env:GITHUB_REPOSITORY
+          $assetPaths = Get-ChildItem artifacts/release/assets -File | Sort-Object Name | ForEach-Object { $_.FullName }
+
+          if ($assetPaths.Count -eq 0) {
+              throw 'No release assets were produced.'
+          }
+
+          & gh release upload $tag @assetPaths --repo $repo --clobber
+          if ($LASTEXITCODE -ne 0) {
+              throw "gh release upload failed for $tag"
+          }

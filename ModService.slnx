@@ -4,6 +4,7 @@
     <Project Path="src/ModService.GitHub/ModService.GitHub.csproj" />
     <Project Path="src/ModService.Host/ModService.Host.csproj" />
     <Project Path="src/ModService.Interop/ModService.Interop.csproj" />
+    <Project Path="src/ModService.TestTarget/ModService.TestTarget.csproj" />
     <Project Path="src/ModService.Tool/ModService.Tool.csproj" />
   </Folder>
   <Folder Name="/tests/">

@@ -21,6 +21,11 @@ public static class ConfigurationValidator
             errors.Add("Polling jitterSeconds cannot be negative.");
         }
 
+        if (configuration.ProcessMonitoring.Enabled && configuration.ProcessMonitoring.ScanIntervalSeconds <= 0)
+        {
+            errors.Add("Process monitoring scanIntervalSeconds must be greater than zero when process monitoring is enabled.");
+        }
+
         foreach (var source in configuration.Sources)
         {
             if (string.IsNullOrWhiteSpace(source.Id))

@@ -4,6 +4,8 @@ public sealed class ModServiceConfiguration
 {
     public PollingConfiguration Polling { get; set; } = new();
 
+    public ProcessMonitoringConfiguration ProcessMonitoring { get; set; } = new();
+
     public ExecutorConfiguration Executor { get; set; } = new();
 
     public List<SourceConfiguration> Sources { get; set; } = [];
@@ -18,6 +20,13 @@ public sealed class PollingConfiguration
     public int IntervalSeconds { get; set; } = 300;
 
     public int JitterSeconds { get; set; } = 30;
+}
+
+public sealed class ProcessMonitoringConfiguration
+{
+    public bool Enabled { get; set; } = true;
+
+    public int ScanIntervalSeconds { get; set; } = 2;
 }
 
 public sealed class ExecutorConfiguration
