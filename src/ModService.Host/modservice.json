@@ -1,0 +1,32 @@
+{
+  "ModService": {
+    "executor": {
+      "source": "core",
+      "asset": "injector.dll"
+    },
+    "sources": [
+      {
+        "id": "core",
+        "repo": "owner/core-mods",
+        "tag": "stable"
+      }
+    ],
+    "rules": [
+      {
+        "name": "example",
+        "process": "game*.exe",
+        "bindings": [
+          {
+            "source": "core",
+            "include": [
+              "*.dll"
+            ]
+          }
+        ],
+        "passEnvironment": [
+          "MODSERVICE_PROFILE"
+        ]
+      }
+    ]
+  }
+}

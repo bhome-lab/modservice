@@ -1,0 +1,64 @@
+namespace ModService.Core.Configuration;
+
+public sealed class ModServiceConfiguration
+{
+    public ExecutorConfiguration Executor { get; set; } = new();
+
+    public List<SourceConfiguration> Sources { get; set; } = [];
+
+    public List<MatchCriteria> Excludes { get; set; } = [];
+
+    public List<RuleConfiguration> Rules { get; set; } = [];
+}
+
+public sealed class ExecutorConfiguration
+{
+    public string Source { get; set; } = string.Empty;
+
+    public string Asset { get; set; } = string.Empty;
+}
+
+public sealed class SourceConfiguration
+{
+    public string Id { get; set; } = string.Empty;
+
+    public string Repo { get; set; } = string.Empty;
+
+    public string Tag { get; set; } = string.Empty;
+}
+
+public class MatchCriteria
+{
+    public string? Process { get; set; }
+
+    public string? Path { get; set; }
+
+    public List<EnvMatchCondition> Env { get; set; } = [];
+}
+
+public sealed class RuleConfiguration : MatchCriteria
+{
+    public string? Name { get; set; }
+
+    public List<string> PassEnvironment { get; set; } = [];
+
+    public List<BindingConfiguration> Bindings { get; set; } = [];
+}
+
+public sealed class BindingConfiguration
+{
+    public string Source { get; set; } = string.Empty;
+
+    public List<string> Include { get; set; } = [];
+
+    public List<string> Exclude { get; set; } = [];
+}
+
+public sealed class EnvMatchCondition
+{
+    public string Name { get; set; } = string.Empty;
+
+    public string Op { get; set; } = "exists";
+
+    public string? Value { get; set; }
+}

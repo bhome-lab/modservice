@@ -1,0 +1,15 @@
+bin/
+obj/
+.vs/
+artifacts/cache/
+artifacts/e2e/
+artifacts/native/
+artifacts/publish/
+native/**/obj/
+*.user
+*.suo
+*.pdb
+*.ilk
+*.ipch
+*.VC.db
+*.VC.opendb
