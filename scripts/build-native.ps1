@@ -8,7 +8,8 @@ param(
 $msbuild = (Get-Command MSBuild.exe -ErrorAction Stop).Source
 $projects = @(
     'native/NativeExecutor/NativeExecutor.vcxproj',
-    'native/SampleModule/SampleModule.vcxproj'
+    'native/SampleModule/SampleModule.vcxproj',
+    'native/TestApp/TestApp.vcxproj'
 )
 
 foreach ($project in $projects) {
