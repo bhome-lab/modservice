@@ -48,6 +48,27 @@ public static class ConfigurationValidator
             {
                 errors.Add($"Source '{source.Id}' is missing tag.");
             }
+
+            ValidatePatterns($"Source '{source.Id}' include", source.Include, errors);
+            ValidatePatterns($"Source '{source.Id}' exclude", source.Exclude, errors);
+
+            var archiveAssets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var archive in source.Archives)
+            {
+                if (string.IsNullOrWhiteSpace(archive.Asset))
+                {
+                    errors.Add($"Source '{source.Id}' contains an archive without an asset name.");
+                    continue;
+                }
+
+                if (!archiveAssets.Add(archive.Asset))
+                {
+                    errors.Add($"Source '{source.Id}' contains duplicate archive asset '{archive.Asset}'.");
+                }
+
+                ValidatePatterns($"Archive '{archive.Asset}' include", archive.Include, errors);
+                ValidatePatterns($"Archive '{archive.Asset}' exclude", archive.Exclude, errors);
+            }
         }
 
         if (string.IsNullOrWhiteSpace(configuration.Executor.Source))
@@ -115,6 +136,19 @@ public static class ConfigurationValidator
             if (string.Equals(condition.Op, "equals", StringComparison.OrdinalIgnoreCase) && condition.Value is null)
             {
                 errors.Add($"{owner} uses 'equals' for environment variable '{condition.Name}' without a value.");
+            }
+        }
+    }
+
+    private static void ValidatePatterns(string owner, IEnumerable<string> patterns, List<string> errors)
+    {
+        var index = 0;
+        foreach (var pattern in patterns)
+        {
+            index++;
+            if (string.IsNullOrWhiteSpace(pattern))
+            {
+                errors.Add($"{owner} contains an empty pattern at index {index}.");
             }
         }
     }

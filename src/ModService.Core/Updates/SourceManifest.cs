@@ -10,7 +10,35 @@ public sealed class SourceManifest
 
     public DateTimeOffset SyncedAtUtc { get; init; }
 
+    public DirectSnapshotRecord? CurrentDirectSnapshot { get; init; }
+
     public List<CurrentAssetRecord> CurrentAssets { get; init; } = [];
+
+    public List<ProcessedArchiveRecord> ProcessedArchives { get; init; } = [];
+}
+
+public sealed class DirectSnapshotRecord
+{
+    public required string RevisionHash { get; init; }
+
+    public required string RootPath { get; init; }
+
+    public List<DirectFileRecord> Files { get; init; } = [];
+}
+
+public sealed class DirectFileRecord
+{
+    public required string Id { get; init; }
+
+    public required string AssetName { get; init; }
+
+    public required long Size { get; init; }
+
+    public required DateTimeOffset UpdatedAtUtc { get; init; }
+
+    public required string Sha256 { get; init; }
+
+    public required string FullPath { get; init; }
 }
 
 public sealed class CurrentAssetRecord
@@ -26,6 +54,25 @@ public sealed class CurrentAssetRecord
     public required string Sha256 { get; init; }
 
     public required string FullPath { get; init; }
+}
+
+public sealed class ProcessedArchiveRecord
+{
+    public required string Id { get; init; }
+
+    public required string AssetName { get; init; }
+
+    public required long Size { get; init; }
+
+    public required DateTimeOffset UpdatedAtUtc { get; init; }
+
+    public required string ArchiveSha256 { get; init; }
+
+    public required string RootPath { get; init; }
+
+    public required string SelectionKey { get; init; }
+
+    public List<CurrentAssetRecord> SelectedAssets { get; init; } = [];
 }
 
 public sealed class SourceSyncResult

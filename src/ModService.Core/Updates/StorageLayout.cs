@@ -12,11 +12,23 @@ public sealed class StorageLayout(string rootDirectory)
 
     public string GetManifestPath(string sourceId) => Path.Combine(ManifestsDirectory, $"{sourceId}.json");
 
-    public string GetAssetDirectory(string sourceId, string assetName, string sha256)
-        => Path.Combine(SourcesDirectory, sourceId, assetName, sha256);
+    public string GetSourceDirectory(string sourceId)
+        => Path.Combine(SourcesDirectory, sourceId);
 
-    public string GetAssetPath(string sourceId, string assetName, string sha256)
-        => Path.Combine(GetAssetDirectory(sourceId, assetName, sha256), assetName);
+    public string GetDirectDirectory(string sourceId)
+        => Path.Combine(GetSourceDirectory(sourceId), "direct");
+
+    public string GetDirectRevisionRoot(string sourceId, string revisionHash)
+        => Path.Combine(GetDirectDirectory(sourceId), revisionHash);
+
+    public string GetArchiveDirectory(string sourceId)
+        => Path.Combine(GetSourceDirectory(sourceId), "archives");
+
+    public string GetArchiveAssetDirectory(string sourceId, string archiveAssetName)
+        => Path.Combine(GetArchiveDirectory(sourceId), archiveAssetName);
+
+    public string GetArchiveRevisionRoot(string sourceId, string archiveAssetName, string archiveSha256)
+        => Path.Combine(GetArchiveAssetDirectory(sourceId, archiveAssetName), archiveSha256);
 
     public string GetSourceStagingDirectory(string sourceId)
         => Path.Combine(StagingDirectory, sourceId, Guid.NewGuid().ToString("N"));

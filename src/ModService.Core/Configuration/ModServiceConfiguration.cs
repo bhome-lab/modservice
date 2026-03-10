@@ -43,6 +43,21 @@ public sealed class SourceConfiguration
     public string Repo { get; set; } = string.Empty;
 
     public string Tag { get; set; } = string.Empty;
+
+    public List<string> Include { get; set; } = [];
+
+    public List<string> Exclude { get; set; } = [];
+
+    public List<ArchiveConfiguration> Archives { get; set; } = [];
+}
+
+public sealed class ArchiveConfiguration
+{
+    public string Asset { get; set; } = string.Empty;
+
+    public List<string> Include { get; set; } = [];
+
+    public List<string> Exclude { get; set; } = [];
 }
 
 public class MatchCriteria
