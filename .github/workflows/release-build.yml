@@ -2,9 +2,8 @@ name: Release Build
 
 on:
   push:
-    tags:
-      - 'v*'
-      - 'r*'
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       tag:
@@ -57,7 +56,7 @@ jobs:
             $target = '${{ inputs.target }}'
             $prerelease = '${{ inputs.prerelease }}'
           } else {
-            $tag = $env:GITHUB_REF_NAME
+            $tag = "r$env:GITHUB_RUN_NUMBER"
             $target = $env:GITHUB_SHA
             $prerelease = 'false'
           }
@@ -125,3 +124,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               throw "gh release upload failed for $tag"
           }
+
+      - name: Refresh moving latest release
+        if: env.RELEASE_PRERELEASE != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/update-release-channel.ps1 `
+            -Repo $env:GITHUB_REPOSITORY `
+            -SourceTag $env:RELEASE_TAG `
+            -ChannelTag latest `
+            -Target $env:RELEASE_TARGET `
+            -Title Latest `
+            -Notes "Moving latest release channel for $($env:RELEASE_TAG)."

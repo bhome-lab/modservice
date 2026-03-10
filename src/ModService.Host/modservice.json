@@ -1,50 +1,49 @@
 {
   "ModService": {
     "polling": {
-      "intervalSeconds": 300,
-      "jitterSeconds": 30
+      "intervalSeconds": 5,
+      "jitterSeconds": 2
     },
     "processMonitoring": {
       "enabled": true,
       "scanIntervalSeconds": 2
     },
     "executor": {
-      "source": "core",
-      "asset": "injector.dll",
+      "source": "repo",
+      "asset": "NativeExecutor.dll",
       "options": [
         {
           "name": "mode",
-          "value": "load-library"
+          "value": "safe-smoke"
         }
       ]
     },
     "sources": [
       {
-        "id": "core",
-        "repo": "owner/core-mods",
-        "tag": "stable"
+        "id": "repo",
+        "repo": "bhome-lab/modservice",
+        "tag": "latest",
+        "include": [
+          "NativeExecutor.dll",
+          "SampleModule.dll"
+        ]
       }
     ],
     "rules": [
       {
-        "name": "example",
-        "process": "game*.exe",
+        "name": "testtarget-self-load",
+        "process": "ModService.TestTarget.exe",
         "bindings": [
           {
-            "source": "core",
+            "source": "repo",
             "include": [
-              "*.dll"
+              "SampleModule.dll"
             ]
           }
         ],
-        "executorOptions": [
-          {
-            "name": "profile",
-            "value": "main"
-          }
-        ],
         "passEnvironment": [
-          "MODSERVICE_PROFILE"
+          "MODSERVICE_SAMPLE_OUTPUT",
+          "MODSERVICE_SAMPLE_MARKER"
         ]
       }
     ]
