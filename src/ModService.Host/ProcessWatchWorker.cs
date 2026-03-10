@@ -1,23 +1,24 @@
 using System.Diagnostics;
-using Microsoft.Extensions.Options;
 using ModService.Core.Configuration;
+using ModService.Core.Execution;
 using ModService.Core.Matching;
 using ModService.Core.Processes;
 using ModService.Core.Updates;
+using ModService.Interop.Native;
 
 namespace ModService.Host;
 
 public sealed class ProcessWatchWorker(
-    IOptionsMonitor<ModServiceConfiguration> optionsMonitor,
+    EffectiveConfigurationStore configurationStore,
     SourceSyncService syncService,
     RuleResolver resolver,
     ILogger<ProcessWatchWorker> logger) : BackgroundService
 {
-    private readonly HashSet<string> _knownProcesses = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _observedProcesses = new(StringComparer.OrdinalIgnoreCase);
 
     public override Task StartAsync(CancellationToken cancellationToken)
     {
-        SeedKnownProcesses();
+        SeedObservedProcesses();
         return base.StartAsync(cancellationToken);
     }
 
@@ -27,7 +28,14 @@ public sealed class ProcessWatchWorker(
         {
             try
             {
-                ObserveProcesses(optionsMonitor.CurrentValue);
+                if (configurationStore.TryGetCurrent(out var configuration))
+                {
+                    ObserveProcesses(configuration);
+                }
+                else
+                {
+                    logger.LogWarning("Skipping process watch because no valid configuration is available yet.");
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -38,33 +46,14 @@ public sealed class ProcessWatchWorker(
                 logger.LogError(exception, "Process watch scan failed.");
             }
 
-            var delay = TimeSpan.FromSeconds(Math.Max(1, optionsMonitor.CurrentValue.ProcessMonitoring.ScanIntervalSeconds));
+            var delay = configurationStore.GetProcessScanDelay();
             await Task.Delay(delay, stoppingToken);
         }
-    }
-
-    private void SeedKnownProcesses()
-    {
-        foreach (var process in Process.GetProcesses())
-        {
-            if (TryCreateSnapshot(process, out var snapshot))
-            {
-                _knownProcesses.Add(CreateProcessKey(snapshot));
-            }
-        }
-
-        logger.LogInformation("Process watcher seeded with {ProcessCount} running processes.", _knownProcesses.Count);
     }
 
     private void ObserveProcesses(ModServiceConfiguration configuration)
     {
         if (!configuration.ProcessMonitoring.Enabled)
-        {
-            return;
-        }
-
-        var errors = ConfigurationValidator.Validate(configuration);
-        if (errors.Count > 0)
         {
             return;
         }
@@ -82,31 +71,62 @@ public sealed class ProcessWatchWorker(
 
             var key = CreateProcessKey(snapshot);
             currentKeys.Add(key);
-            if (_knownProcesses.Contains(key))
+            if (_observedProcesses.Contains(key))
             {
                 continue;
             }
 
             assets ??= syncService.LoadCurrentAssets();
-            executorPath ??= TryResolveExecutorPath(configuration);
             var plan = resolver.Resolve(configuration, snapshot, assets);
-            if (plan is not null)
+            if (plan is null)
             {
-                logger.LogInformation(
-                    "Observed matching process {ProcessName} (pid={Pid}) with rule {RuleName}; executor={ExecutorPath}; modules={ModuleCount}. Observe-only mode does not activate external processes.",
+                _observedProcesses.Add(key);
+                continue;
+            }
+
+            if (plan.ModulePaths.Count == 0)
+            {
+                logger.LogWarning(
+                    "Matched process {ProcessName} (pid={Pid}) with rule {RuleName}, but no module paths are available yet.",
                     snapshot.ProcessName,
                     snapshot.ProcessId,
-                    plan.RuleName,
-                    executorPath ?? "unavailable",
-                    plan.ModulePaths.Count);
+                    plan.RuleName);
+                _observedProcesses.Add(key);
+                continue;
+            }
+
+            executorPath ??= TryResolveExecutorPath(configuration);
+            if (string.IsNullOrWhiteSpace(executorPath))
+            {
+                logger.LogWarning(
+                    "Matched process {ProcessName} (pid={Pid}) with rule {RuleName}, but the executor is not available yet.",
+                    snapshot.ProcessName,
+                    snapshot.ProcessId,
+                    plan.RuleName);
+                _observedProcesses.Add(key);
+                continue;
+            }
+
+            TryExecute(snapshot, plan, executorPath);
+            _observedProcesses.Add(key);
+        }
+
+        _observedProcesses.RemoveWhere(key => !currentKeys.Contains(key));
+    }
+
+    private void SeedObservedProcesses()
+    {
+        foreach (var process in Process.GetProcesses())
+        {
+            if (TryCreateProcessKey(process, out var key))
+            {
+                _observedProcesses.Add(key);
             }
         }
 
-        _knownProcesses.Clear();
-        foreach (var key in currentKeys)
-        {
-            _knownProcesses.Add(key);
-        }
+        logger.LogInformation(
+            "Process watcher seeded with {ProcessCount} running processes; existing processes will not be activated on startup.",
+            _observedProcesses.Count);
     }
 
     private string? TryResolveExecutorPath(ModServiceConfiguration configuration)
@@ -121,8 +141,77 @@ public sealed class ProcessWatchWorker(
         }
     }
 
+    private bool TryExecute(ProcessSnapshot snapshot, ResolvedExecutionPlan plan, string executorPath)
+    {
+        try
+        {
+            using var client = new NativeExecutorClient(executorPath);
+            var result = client.Execute(new NativeExecuteRequest
+            {
+                ProcessId = (uint)snapshot.ProcessId,
+                ProcessCreateTimeUtc100ns = snapshot.ProcessCreateTimeUtc100ns,
+                ExecutablePath = snapshot.ExePath,
+                ModulePaths = plan.ModulePaths,
+                EnvironmentVariables = plan.EnvironmentVariables
+                    .Select(item => new NativeEnvironmentVariable { Name = item.Name, Value = item.Value })
+                    .ToArray(),
+                ExecutorOptions = plan.ExecutorOptions
+                    .Select(item => new NativeExecutorOption { Name = item.Name, Value = item.Value })
+                    .ToArray(),
+                TimeoutMs = 1_000
+            });
+
+            if (!result.IsSuccess)
+            {
+                logger.LogWarning(
+                    "Executor failed for process {ProcessName} (pid={Pid}) with rule {RuleName}: status={Status}, error={Error}.",
+                    snapshot.ProcessName,
+                    snapshot.ProcessId,
+                    plan.RuleName,
+                    result.Status,
+                    result.ErrorText ?? string.Empty);
+                return false;
+            }
+
+            logger.LogInformation(
+                "Activated process {ProcessName} (pid={Pid}) with rule {RuleName}; executor={ExecutorPath}; modules={ModuleCount}; env={EnvironmentCount}.",
+                snapshot.ProcessName,
+                snapshot.ProcessId,
+                plan.RuleName,
+                executorPath,
+                plan.ModulePaths.Count,
+                plan.EnvironmentVariables.Count);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(
+                exception,
+                "Executor invocation failed for process {ProcessName} (pid={Pid}) with rule {RuleName}.",
+                snapshot.ProcessName,
+                snapshot.ProcessId,
+                plan.RuleName);
+            return false;
+        }
+    }
+
     private static string CreateProcessKey(ProcessSnapshot snapshot)
         => $"{snapshot.ProcessId}|{snapshot.ProcessCreateTimeUtc100ns}";
+
+    private static bool TryCreateProcessKey(Process process, out string key)
+    {
+        key = string.Empty;
+
+        try
+        {
+            key = $"{process.Id}|{(ulong)process.StartTime.ToUniversalTime().ToFileTimeUtc()}";
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static bool TryCreateSnapshot(Process process, out ProcessSnapshot snapshot)
     {
@@ -142,7 +231,7 @@ public sealed class ProcessWatchWorker(
                 ProcessName = Path.GetFileName(executablePath),
                 ExePath = executablePath,
                 ProcessCreateTimeUtc100ns = (ulong)process.StartTime.ToUniversalTime().ToFileTimeUtc(),
-                Environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                Environment = ProcessEnvironmentReader.Read(process)
             };
             return true;
         }

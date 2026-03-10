@@ -211,6 +211,42 @@ public sealed class SourceSyncServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task SyncAsync_RejectsRootedArchiveEntries()
+    {
+        Directory.CreateDirectory(_root);
+        var client = new FakeGitHubReleaseClient();
+        client.AddZipAsset(
+            "mods",
+            "bundle.zip",
+            new Dictionary<string, byte[]>
+            {
+                ["C:/cache/rooted/evil.dll"] = Encoding.UTF8.GetBytes("evil")
+            });
+
+        var service = new SourceSyncService(new StorageLayout(_root), client);
+        var configuration = new ModServiceConfiguration
+        {
+            Executor = new ExecutorConfiguration { Source = "mods", Asset = "evil.dll" },
+            Sources =
+            [
+                new SourceConfiguration
+                {
+                    Id = "mods",
+                    Repo = "owner/repo",
+                    Tag = "stable",
+                    Archives =
+                    [
+                        new ArchiveConfiguration { Asset = "bundle.zip" }
+                    ]
+                }
+            ]
+        };
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() => service.SyncAsync(configuration, CancellationToken.None));
+        Assert.Contains("rooted path", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task CleanupStaleFiles_SkipsAll_WhenAnyStaleFileIsLocked()
     {
         Directory.CreateDirectory(_root);

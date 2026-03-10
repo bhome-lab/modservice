@@ -36,7 +36,11 @@ public sealed class RuleResolverTests
                     Name = "main",
                     Process = "game*.exe",
                     Env = [new EnvMatchCondition { Name = "MOD_PROFILE", Op = "equals", Value = "main" }],
-                    PassEnvironment = ["MOD_PROFILE", "MISSING", "MOD_PROFILE"],
+                    ApplyEnvironment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["MODSERVICE_SAMPLE_MARKER"] = "marker-main",
+                        ["MOD_PROFILE"] = "resolved-profile"
+                    },
                     ExecutorOptions =
                     [
                         new ExecutorOptionConfiguration { Name = "profile", Value = "main" },
@@ -81,8 +85,13 @@ public sealed class RuleResolverTests
             plan.EnvironmentVariables,
             variable =>
             {
+                Assert.Equal("MODSERVICE_SAMPLE_MARKER", variable.Name);
+                Assert.Equal("marker-main", variable.Value);
+            },
+            variable =>
+            {
                 Assert.Equal("MOD_PROFILE", variable.Name);
-                Assert.Equal("main", variable.Value);
+                Assert.Equal("resolved-profile", variable.Value);
             });
         Assert.Collection(
             plan.ExecutorOptions,
@@ -133,5 +142,45 @@ public sealed class RuleResolverTests
         var plan = _resolver.Resolve(configuration, snapshot, []);
 
         Assert.Null(plan);
+    }
+
+    [Fact]
+    public void Resolve_SkipsDisabledRules()
+    {
+        var configuration = new ModServiceConfiguration
+        {
+            Executor = new ExecutorConfiguration { Source = "core", Asset = "injector.dll" },
+            Sources = [new SourceConfiguration { Id = "core", Repo = "owner/core", Tag = "stable" }],
+            Rules =
+            [
+                new RuleConfiguration
+                {
+                    Name = "disabled",
+                    Enabled = false,
+                    Process = "*.exe",
+                    Bindings = [new BindingConfiguration { Source = "core" }]
+                },
+                new RuleConfiguration
+                {
+                    Name = "enabled",
+                    Process = "game*.exe",
+                    Bindings = [new BindingConfiguration { Source = "core" }]
+                }
+            ]
+        };
+
+        var snapshot = new ProcessSnapshot
+        {
+            ProcessId = 9,
+            ProcessName = "game-test.exe",
+            ExePath = @"C:\Games\game-test.exe",
+            ProcessCreateTimeUtc100ns = 0,
+            Environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        };
+
+        var plan = _resolver.Resolve(configuration, snapshot, []);
+
+        Assert.NotNull(plan);
+        Assert.Equal("enabled", plan.RuleName);
     }
 }

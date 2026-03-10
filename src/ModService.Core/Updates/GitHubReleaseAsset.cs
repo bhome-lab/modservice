@@ -9,6 +9,10 @@ public sealed class GitHubReleaseAsset
     public required long Size { get; init; }
 
     public required DateTimeOffset UpdatedAt { get; init; }
+
+    public string ApiUrl { get; init; } = string.Empty;
+
+    public string DownloadUrl { get; init; } = string.Empty;
 }
 
 public interface IGitHubReleaseClient

@@ -75,7 +75,9 @@ public sealed class RuleConfiguration : MatchCriteria
 {
     public string? Name { get; set; }
 
-    public List<string> PassEnvironment { get; set; } = [];
+    public bool Enabled { get; set; } = true;
+
+    public Dictionary<string, string> ApplyEnvironment { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public List<ExecutorOptionConfiguration> ExecutorOptions { get; set; } = [];
 

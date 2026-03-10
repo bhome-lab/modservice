@@ -110,6 +110,7 @@ public static class ConfigurationValidator
             }
 
             ValidateEnvironment(rule.Env, $"Rule {DescribeRule(rule, ruleIndex)}", errors);
+            ValidateApplyEnvironment(rule.ApplyEnvironment, $"Rule {DescribeRule(rule, ruleIndex)}", errors);
             ValidateExecutorOptions($"Rule {DescribeRule(rule, ruleIndex)} executorOptions", rule.ExecutorOptions, errors);
         }
 
@@ -152,6 +153,25 @@ public static class ConfigurationValidator
             if (string.IsNullOrWhiteSpace(pattern))
             {
                 errors.Add($"{owner} contains an empty pattern at index {index}.");
+            }
+        }
+    }
+
+    private static void ValidateApplyEnvironment(
+        IReadOnlyDictionary<string, string> variables,
+        string owner,
+        List<string> errors)
+    {
+        foreach (var variable in variables)
+        {
+            if (string.IsNullOrWhiteSpace(variable.Key))
+            {
+                errors.Add($"{owner} applyEnvironment contains an empty variable name.");
+            }
+
+            if (variable.Value is null)
+            {
+                errors.Add($"{owner} applyEnvironment contains variable '{variable.Key}' with a null value.");
             }
         }
     }

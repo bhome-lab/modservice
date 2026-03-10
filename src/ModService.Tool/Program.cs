@@ -114,7 +114,7 @@ internal sealed class ToolApplication
             Console.WriteLine($"- {module}");
         }
 
-        Console.WriteLine("Environment:");
+        Console.WriteLine("Applied environment:");
         foreach (var variable in plan.EnvironmentVariables)
         {
             Console.WriteLine($"- {variable.Name}={variable.Value}");

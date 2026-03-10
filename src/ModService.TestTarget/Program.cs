@@ -93,7 +93,7 @@ internal sealed class TestTargetApplication
                 Console.WriteLine($"- {modulePath}");
             }
 
-            Console.WriteLine("Effective environment:");
+            Console.WriteLine("Applied environment:");
             foreach (var environmentVariable in environmentVariables)
             {
                 Console.WriteLine($"- {environmentVariable.Name}={environmentVariable.Value}");
@@ -287,8 +287,8 @@ internal sealed class TestTargetApplication
         Console.WriteLine("  --cache PATH                  Cache root that contains manifests and immutable DLL storage.");
         Console.WriteLine("  --token-store PATH            DPAPI token store path used only when --sync is enabled.");
         Console.WriteLine("  --sync                        Sync sources before resolving and loading.");
-        Console.WriteLine("  --env NAME=VALUE              Add or override a value for rule matching and passEnvironment resolution.");
-        Console.WriteLine("  --forward-env NAME=VALUE      Append a variable to the executor request after rule resolution.");
+        Console.WriteLine("  --env NAME=VALUE              Add or override a value for rule env matching.");
+        Console.WriteLine("  --forward-env NAME=VALUE      Append or override a variable applied to the target process.");
         Console.WriteLine("  --output PATH                 Marker output file written by SampleModule.dll.");
         Console.WriteLine("  --marker VALUE                Marker text to verify in the output file.");
         Console.WriteLine("  --sample-output-env NAME      Variable name used for the output file. Default MODSERVICE_SAMPLE_OUTPUT.");

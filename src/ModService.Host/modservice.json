@@ -41,10 +41,10 @@
             ]
           }
         ],
-        "passEnvironment": [
-          "MODSERVICE_SAMPLE_OUTPUT",
-          "MODSERVICE_SAMPLE_MARKER"
-        ]
+        "applyEnvironment": {
+          "MODSERVICE_SAMPLE_MARKER": "service-sample-marker",
+          "MODSERVICE_SAMPLE_OUTPUT": "C:\\ProgramData\\ModService\\sample-output.txt"
+        }
       }
     ]
   }

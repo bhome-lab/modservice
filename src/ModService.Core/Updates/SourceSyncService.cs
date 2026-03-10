@@ -684,7 +684,7 @@ public sealed class SourceSyncService
 
     private static void ExtractArchive(string archivePath, string destinationRoot)
     {
-        var fullDestinationRoot = Path.GetFullPath(destinationRoot);
+        var fullDestinationRoot = EnsureTrailingSeparator(Path.GetFullPath(destinationRoot));
         using var archive = ZipFile.OpenRead(archivePath);
         foreach (var entry in archive.Entries)
         {
@@ -720,6 +720,11 @@ public sealed class SourceSyncService
             return string.Empty;
         }
 
+        if (Path.IsPathRooted(normalized.Replace('/', Path.DirectorySeparatorChar)))
+        {
+            throw new InvalidDataException($"Archive entry '{path}' contains an unsupported rooted path.");
+        }
+
         var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (segments.Any(segment => segment is "." or ".."))
         {
@@ -728,6 +733,9 @@ public sealed class SourceSyncService
 
         return string.Join('/', segments);
     }
+
+    private static string EnsureTrailingSeparator(string path)
+        => path.EndsWith(Path.DirectorySeparatorChar) ? path : path + Path.DirectorySeparatorChar;
 
     private static string NormalizeRelativePath(string path)
         => path.Replace('\\', '/');

@@ -1,31 +1,26 @@
-using Microsoft.Extensions.Options;
-using ModService.Core.Configuration;
 using ModService.Core.Updates;
 
 namespace ModService.Host;
 
 public sealed class ModServiceWorker(
-    IOptionsMonitor<ModServiceConfiguration> optionsMonitor,
+    EffectiveConfigurationStore configurationStore,
     SourceSyncService syncService,
     ILogger<ModServiceWorker> logger) : BackgroundService
 {
-    private IDisposable? _subscription;
-
-    public override Task StartAsync(CancellationToken cancellationToken)
-    {
-        LogConfiguration("startup", optionsMonitor.CurrentValue);
-        _subscription = optionsMonitor.OnChange((configuration, _) => LogConfiguration("reload", configuration));
-        return base.StartAsync(cancellationToken);
-    }
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
         {
-            var configuration = optionsMonitor.CurrentValue;
             try
             {
-                await SyncOnceAsync(configuration, stoppingToken);
+                if (configurationStore.TryGetCurrent(out var configuration))
+                {
+                    await SyncOnceAsync(configuration, stoppingToken);
+                }
+                else
+                {
+                    logger.LogWarning("Skipping sync because no valid configuration is available yet.");
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -36,56 +31,18 @@ public sealed class ModServiceWorker(
                 logger.LogError(exception, "Periodic sync failed.");
             }
 
-            var nextDelay = PollingDelayCalculator.ComputeNextDelay(configuration.Polling);
+            var nextDelay = configurationStore.GetSyncDelay();
             logger.LogInformation(
-                "Next sync scheduled in {DelaySeconds} seconds (interval={IntervalSeconds}, jitter={JitterSeconds}).",
-                (int)nextDelay.TotalSeconds,
-                configuration.Polling.IntervalSeconds,
-                configuration.Polling.JitterSeconds);
+                "Next sync scheduled in {DelaySeconds} seconds.",
+                (int)nextDelay.TotalSeconds);
             await Task.Delay(nextDelay, stoppingToken);
         }
     }
 
-    public override Task StopAsync(CancellationToken cancellationToken)
+    private async Task SyncOnceAsync(
+        ModService.Core.Configuration.ModServiceConfiguration configuration,
+        CancellationToken cancellationToken)
     {
-        _subscription?.Dispose();
-        _subscription = null;
-        return base.StopAsync(cancellationToken);
-    }
-
-    private void LogConfiguration(string reason, ModServiceConfiguration configuration)
-    {
-        var errors = ConfigurationValidator.Validate(configuration);
-        if (errors.Count > 0)
-        {
-            logger.LogWarning(
-                "Configuration {Reason} with {ErrorCount} validation errors: {Errors}",
-                reason,
-                errors.Count,
-                string.Join(" | ", errors));
-            return;
-        }
-
-        logger.LogInformation(
-            "Configuration {Reason}: executor {ExecutorSource}/{ExecutorAsset}, {SourceCount} sources, {RuleCount} rules, polling {IntervalSeconds}s+{JitterSeconds}s jitter.",
-            reason,
-            configuration.Executor.Source,
-            configuration.Executor.Asset,
-            configuration.Sources.Count,
-            configuration.Rules.Count,
-            configuration.Polling.IntervalSeconds,
-            configuration.Polling.JitterSeconds);
-    }
-
-    private async Task SyncOnceAsync(ModServiceConfiguration configuration, CancellationToken cancellationToken)
-    {
-        var errors = ConfigurationValidator.Validate(configuration);
-        if (errors.Count > 0)
-        {
-            logger.LogWarning("Skipping sync because configuration is invalid.");
-            return;
-        }
-
         var results = await syncService.SyncAsync(configuration, cancellationToken);
         foreach (var result in results)
         {

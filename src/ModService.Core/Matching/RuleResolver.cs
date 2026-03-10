@@ -22,6 +22,11 @@ public sealed class RuleResolver
 
         foreach (var rule in configuration.Rules)
         {
+            if (!rule.Enabled)
+            {
+                continue;
+            }
+
             if (!Matches(rule, snapshot))
             {
                 continue;
@@ -118,27 +123,14 @@ public sealed class RuleResolver
 
     private static IReadOnlyList<ResolvedEnvironmentVariable> ResolveEnvironment(RuleConfiguration rule, ProcessSnapshot snapshot)
     {
-        var environment = new List<ResolvedEnvironmentVariable>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var name in rule.PassEnvironment)
-        {
-            if (!seen.Add(name))
+        return rule.ApplyEnvironment
+            .OrderBy(variable => variable.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(variable => new ResolvedEnvironmentVariable
             {
-                continue;
-            }
-
-            if (snapshot.Environment.TryGetValue(name, out var value))
-            {
-                environment.Add(new ResolvedEnvironmentVariable
-                {
-                    Name = name,
-                    Value = value
-                });
-            }
-        }
-
-        return environment;
+                Name = variable.Key,
+                Value = variable.Value
+            })
+            .ToArray();
     }
 
     private static IReadOnlyList<ResolvedExecutorOption> ResolveExecutorOptions(

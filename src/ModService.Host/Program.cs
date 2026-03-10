@@ -28,6 +28,7 @@ builder.Services.AddSingleton(new GitHubTokenStore(Path.Combine(programDataRoot,
 builder.Services.AddSingleton<IGitHubReleaseClient, GhReleaseClient>();
 builder.Services.AddSingleton<SourceSyncService>();
 builder.Services.AddSingleton<RuleResolver>();
+builder.Services.AddSingleton<EffectiveConfigurationStore>();
 builder.Services.AddHostedService<ModServiceWorker>();
 builder.Services.AddHostedService<ProcessWatchWorker>();
 
