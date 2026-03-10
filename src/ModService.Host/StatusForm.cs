@@ -190,7 +190,8 @@ public sealed class StatusForm : Form
 
         try
         {
-            _startupValue.Text = _startupTaskService.IsEnabled()
+            var startupEnabled = SafeIsStartupEnabled();
+            _startupValue.Text = startupEnabled
                 ? $"Enabled via scheduled task '{_startupTaskService.TaskName}'."
                 : "Disabled.";
         }
@@ -202,7 +203,7 @@ public sealed class StatusForm : Form
         _updatingToggles = true;
         try
         {
-            _startupCheckBox.Checked = _startupTaskService.IsEnabled();
+            _startupCheckBox.Checked = SafeIsStartupEnabled();
             _notificationsCheckBox.Checked = _preferencesStore.AreProcessNotificationsEnabled();
         }
         finally
@@ -302,6 +303,18 @@ public sealed class StatusForm : Form
                 "ModService",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
+        }
+    }
+
+    private bool SafeIsStartupEnabled()
+    {
+        try
+        {
+            return _startupTaskService.IsEnabled();
+        }
+        catch
+        {
+            return false;
         }
     }
 

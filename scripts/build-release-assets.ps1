@@ -147,7 +147,9 @@ foreach ($nativeAssetPath in $nativeAssets) {
     Copy-Item $nativeAssetPath $assetsRoot -Force
 }
 
-Copy-Item (Join-Path $repoRoot 'src/ModService.Host/modservice.json') (Join-Path $assetsRoot 'modservice.sample.json') -Force
+$configPath = Join-Path $repoRoot 'src/ModService.Host/modservice.json'
+Copy-Item $configPath (Join-Path $assetsRoot 'modservice.json') -Force
+Copy-Item $configPath (Join-Path $assetsRoot 'modservice.sample.json') -Force
 
 $checksumLines = Get-ChildItem $assetsRoot -File |
     Sort-Object Name |

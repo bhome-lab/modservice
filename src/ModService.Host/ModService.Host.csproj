@@ -21,8 +21,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Update="modservice.json">
+    <None Update="modservice.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
   </ItemGroup>
 </Project>

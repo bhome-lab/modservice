@@ -3,6 +3,8 @@ using System.Windows.Forms;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Console;
 using ModService.Core.Configuration;
 using ModService.Core.Matching;
 using ModService.Core.Updates;
@@ -16,6 +18,8 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        StandardExceptionReporter.Install();
+
         using var singleInstance = new Mutex(initiallyOwned: true, @"Local\ModService.Tray", out var isFirstInstance);
         if (!isFirstInstance)
         {
@@ -46,6 +50,7 @@ internal static class Program
         }
         catch (Exception exception)
         {
+            StandardExceptionReporter.Report("Fatal startup exception", exception);
             MessageBox.Show(
                 exception.Message,
                 "ModService",
@@ -63,6 +68,12 @@ internal static class Program
         });
 
         builder.Configuration.AddJsonFile("modservice.json", optional: true, reloadOnChange: true);
+        builder.Logging.ClearProviders();
+        builder.Logging.AddSimpleConsole();
+        builder.Services.Configure<ConsoleLoggerOptions>(options =>
+        {
+            options.LogToStandardErrorThreshold = LogLevel.Warning;
+        });
 
         builder.Services
             .AddOptions<ModServiceConfiguration>()

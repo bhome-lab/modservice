@@ -24,6 +24,10 @@ public sealed class StartupTaskService
             dynamic task = rootFolder.GetTask(TaskName);
             return task.Enabled;
         }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
         catch (COMException exception) when ((uint)exception.HResult == FileNotFoundHResult)
         {
             return false;
@@ -86,6 +90,9 @@ public sealed class StartupTaskService
             dynamic service = CreateService();
             dynamic rootFolder = service.GetFolder("\\");
             rootFolder.DeleteTask(TaskName, 0);
+        }
+        catch (FileNotFoundException)
+        {
         }
         catch (COMException exception) when ((uint)exception.HResult == FileNotFoundHResult)
         {
