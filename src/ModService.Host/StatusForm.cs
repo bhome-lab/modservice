@@ -11,15 +11,17 @@ public sealed class StatusForm : Form
     private readonly IRefreshController _refreshController;
     private readonly StartupTaskService _startupTaskService;
     private readonly TrayPreferencesStore _preferencesStore;
+    private readonly GitHubTokenManager _tokenManager;
     private readonly ApplicationPaths _paths;
     private readonly System.Windows.Forms.Timer _refreshTimer;
 
-    private readonly Label _configPathValue;
-    private readonly Label _configStatusValue;
-    private readonly Label _startupValue;
-    private readonly Label _refreshValue;
-    private readonly Label _executorValue;
-    private readonly Label _processValue;
+    private readonly TextBox _configPathValue;
+    private readonly TextBox _configStatusValue;
+    private readonly TextBox _startupValue;
+    private readonly TextBox _tokenValue;
+    private readonly TextBox _refreshValue;
+    private readonly TextBox _executorValue;
+    private readonly TextBox _processValue;
     private readonly CheckBox _startupCheckBox;
     private readonly CheckBox _notificationsCheckBox;
     private readonly ListView _sourcesList;
@@ -34,6 +36,7 @@ public sealed class StatusForm : Form
         IRefreshController refreshController,
         StartupTaskService startupTaskService,
         TrayPreferencesStore preferencesStore,
+        GitHubTokenManager tokenManager,
         ApplicationPaths paths)
     {
         _runtimeState = runtimeState;
@@ -41,6 +44,7 @@ public sealed class StatusForm : Form
         _refreshController = refreshController;
         _startupTaskService = startupTaskService;
         _preferencesStore = preferencesStore;
+        _tokenManager = tokenManager;
         _paths = paths;
 
         Text = "ModService Status";
@@ -66,19 +70,24 @@ public sealed class StatusForm : Form
         {
             Dock = DockStyle.Top,
             ColumnCount = 2,
-            RowCount = 6,
+            RowCount = 7,
             AutoSize = true
         };
         summaryGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
         summaryGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (var rowIndex = 0; rowIndex < summaryGrid.RowCount; rowIndex++)
+        {
+            summaryGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        }
         root.Controls.Add(summaryGrid, 0, 0);
 
         _configPathValue = AddSummaryRow(summaryGrid, 0, "Config File");
         _configStatusValue = AddSummaryRow(summaryGrid, 1, "Config Status");
         _startupValue = AddSummaryRow(summaryGrid, 2, "Startup");
-        _refreshValue = AddSummaryRow(summaryGrid, 3, "Refresh");
-        _executorValue = AddSummaryRow(summaryGrid, 4, "Executor");
-        _processValue = AddSummaryRow(summaryGrid, 5, "Process Watch");
+        _tokenValue = AddSummaryRow(summaryGrid, 3, "GitHub Token");
+        _refreshValue = AddSummaryRow(summaryGrid, 4, "Refresh");
+        _executorValue = AddSummaryRow(summaryGrid, 5, "Executor");
+        _processValue = AddSummaryRow(summaryGrid, 6, "Process Watch");
 
         var actionsPanel = new FlowLayoutPanel
         {
@@ -104,6 +113,30 @@ public sealed class StatusForm : Form
         };
         openConfigButton.Click += (_, _) => OpenConfig();
         actionsPanel.Controls.Add(openConfigButton);
+
+        var setTokenButton = new Button
+        {
+            Text = "Set GitHub Token",
+            AutoSize = true
+        };
+        setTokenButton.Click += async (_, _) => await SetTokenAsync();
+        actionsPanel.Controls.Add(setTokenButton);
+
+        var importTokenButton = new Button
+        {
+            Text = "Import Token From gh",
+            AutoSize = true
+        };
+        importTokenButton.Click += async (_, _) => await ImportTokenFromGhAsync();
+        actionsPanel.Controls.Add(importTokenButton);
+
+        var clearTokenButton = new Button
+        {
+            Text = "Clear GitHub Token",
+            AutoSize = true
+        };
+        clearTokenButton.Click += (_, _) => ClearToken();
+        actionsPanel.Controls.Add(clearTokenButton);
 
         _startupCheckBox = new CheckBox
         {
@@ -184,6 +217,7 @@ public sealed class StatusForm : Form
 
         _configPathValue.Text = _paths.ConfigPath;
         _configStatusValue.Text = BuildConfigurationStatusText(configuration);
+        _tokenValue.Text = BuildTokenText();
         _refreshValue.Text = BuildRefreshText(runtime);
         _executorValue.Text = runtime.ExecutorPath ?? "Executor not available yet.";
         _processValue.Text = BuildProcessText(runtime);
@@ -306,6 +340,61 @@ public sealed class StatusForm : Form
         }
     }
 
+    private async Task SetTokenAsync()
+    {
+        using var dialog = new TokenEntryForm();
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        await RunTokenActionAsync(
+            cancellationToken => _tokenManager.SaveAsync(dialog.Token, cancellationToken),
+            "Saved GitHub token.");
+    }
+
+    private async Task ImportTokenFromGhAsync()
+    {
+        await RunTokenActionAsync(
+            _tokenManager.ImportFromGhAsync,
+            "Imported GitHub token from gh.");
+    }
+
+    private void ClearToken()
+    {
+        if (MessageBox.Show(
+                this,
+                "Clear the stored GitHub token?",
+                "ModService",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question) != DialogResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            _tokenManager.Clear();
+            MessageBox.Show(
+                this,
+                "Cleared GitHub token.",
+                "ModService",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                this,
+                exception.Message,
+                "ModService",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+
+        RefreshView();
+    }
+
     private bool SafeIsStartupEnabled()
     {
         try
@@ -315,6 +404,47 @@ public sealed class StatusForm : Form
         catch
         {
             return false;
+        }
+    }
+
+    private string BuildTokenText()
+    {
+        return _tokenManager.HasToken()
+            ? $"Configured. Store: {_tokenManager.FilePath}"
+            : $"Not configured. Store: {_tokenManager.FilePath}";
+    }
+
+    private async Task RunTokenActionAsync(
+        Func<CancellationToken, Task> action,
+        string successMessage)
+    {
+        Enabled = false;
+        UseWaitCursor = true;
+
+        try
+        {
+            await action(CancellationToken.None);
+            MessageBox.Show(
+                this,
+                successMessage,
+                "ModService",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                this,
+                exception.Message,
+                "ModService",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+        finally
+        {
+            UseWaitCursor = false;
+            Enabled = true;
+            RefreshView();
         }
     }
 
@@ -355,7 +485,7 @@ public sealed class StatusForm : Form
         return $"{snapshot.LastProcessScanSummary} Last activation: {activation}";
     }
 
-    private static Label AddSummaryRow(TableLayoutPanel parent, int rowIndex, string title)
+    private static TextBox AddSummaryRow(TableLayoutPanel parent, int rowIndex, string title)
     {
         parent.Controls.Add(new Label
         {
@@ -366,15 +496,19 @@ public sealed class StatusForm : Form
             Text = title
         }, 0, rowIndex);
 
-        var value = new Label
+        var value = new TextBox
         {
-            AutoSize = false,
             BorderStyle = BorderStyle.FixedSingle,
             Dock = DockStyle.Fill,
             Margin = new Padding(0, 0, 0, 8),
-            Padding = new Padding(6),
-            TextAlign = ContentAlignment.MiddleLeft
+            MinimumSize = new Size(0, 52),
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical,
+            TabStop = false,
+            WordWrap = true
         };
+        value.BackColor = SystemColors.Window;
         parent.Controls.Add(value, 1, rowIndex);
         return value;
     }
@@ -399,7 +533,8 @@ public sealed class StatusForm : Form
             Multiline = true,
             ReadOnly = true,
             ScrollBars = ScrollBars.Vertical,
-            BorderStyle = BorderStyle.FixedSingle
+            BorderStyle = BorderStyle.FixedSingle,
+            Dock = DockStyle.Fill
         };
     }
 }

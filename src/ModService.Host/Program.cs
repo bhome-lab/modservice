@@ -90,6 +90,8 @@ internal static class Program
             var paths = sp.GetRequiredService<ApplicationPaths>();
             return new GitHubTokenStore(Path.Combine(paths.ProgramDataRoot, "secrets", "github-token.bin"));
         });
+        builder.Services.AddSingleton<IGitHubCli, GhCli>();
+        builder.Services.AddSingleton<GitHubTokenManager>();
         builder.Services.AddSingleton<IGitHubReleaseClient, GhReleaseClient>();
         builder.Services.AddSingleton<SourceSyncService>();
         builder.Services.AddSingleton<RuleResolver>();
