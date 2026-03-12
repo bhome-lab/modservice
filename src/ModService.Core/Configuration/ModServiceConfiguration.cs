@@ -4,6 +4,8 @@ public sealed class ModServiceConfiguration
 {
     public PollingConfiguration Polling { get; set; } = new();
 
+    public HttpApiConfiguration Http { get; set; } = new();
+
     public ProcessMonitoringConfiguration ProcessMonitoring { get; set; } = new();
 
     public ExecutorConfiguration Executor { get; set; } = new();
@@ -20,6 +22,11 @@ public sealed class PollingConfiguration
     public int IntervalSeconds { get; set; } = 300;
 
     public int JitterSeconds { get; set; } = 30;
+}
+
+public sealed class HttpApiConfiguration
+{
+    public string ListenUrl { get; set; } = "http://127.0.0.1:5047";
 }
 
 public sealed class ProcessMonitoringConfiguration

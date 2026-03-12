@@ -21,6 +21,8 @@ public static class ConfigurationValidator
             errors.Add("Polling jitterSeconds cannot be negative.");
         }
 
+        ValidateHttpApi(configuration.Http, errors);
+
         if (configuration.ProcessMonitoring.Enabled && configuration.ProcessMonitoring.ScanIntervalSeconds <= 0)
         {
             errors.Add("Process monitoring scanIntervalSeconds must be greater than zero when process monitoring is enabled.");
@@ -141,6 +143,41 @@ public static class ConfigurationValidator
             {
                 errors.Add($"{owner} uses 'equals' for environment variable '{condition.Name}' without a value.");
             }
+        }
+    }
+
+    private static void ValidateHttpApi(HttpApiConfiguration configuration, List<string> errors)
+    {
+        if (string.IsNullOrWhiteSpace(configuration.ListenUrl))
+        {
+            errors.Add("HTTP API listenUrl is required.");
+            return;
+        }
+
+        if (!Uri.TryCreate(configuration.ListenUrl, UriKind.Absolute, out var uri))
+        {
+            errors.Add($"HTTP API listenUrl '{configuration.ListenUrl}' is not a valid absolute URI.");
+            return;
+        }
+
+        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add($"HTTP API listenUrl '{configuration.ListenUrl}' must use the http scheme.");
+        }
+
+        if (!string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
+        {
+            errors.Add($"HTTP API listenUrl '{configuration.ListenUrl}' must not include a query string or fragment.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(uri.AbsolutePath) && !string.Equals(uri.AbsolutePath, "/", StringComparison.Ordinal))
+        {
+            errors.Add($"HTTP API listenUrl '{configuration.ListenUrl}' must not include a path.");
+        }
+
+        if (uri.Port <= 0)
+        {
+            errors.Add($"HTTP API listenUrl '{configuration.ListenUrl}' must include an explicit TCP port.");
         }
     }
 

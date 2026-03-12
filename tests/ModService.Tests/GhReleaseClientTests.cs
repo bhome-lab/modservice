@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using ModService.Core.Configuration;
+using ModService.Core.Updates;
 using ModService.GitHub.Gh;
 
 namespace ModService.Tests;
@@ -69,6 +70,43 @@ public sealed class GhReleaseClientTests : IDisposable
 
         var downloadedPath = await client.DownloadAssetAsync(source, asset, _root, CancellationToken.None);
         Assert.Equal("hello", await File.ReadAllTextAsync(downloadedPath, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetReleaseAssetsAsync_ThrowsGitHubRateLimitException_WhenGitHubReturnsRateLimit()
+    {
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(request =>
+        {
+            if (request.RequestUri?.AbsoluteUri == "https://api.github.com/repos/owner/repo/releases/tags/latest")
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.Forbidden)
+                {
+                    Content = new StringContent("{\"message\":\"rate limit exceeded\"}", Encoding.UTF8, "application/json")
+                };
+                response.Headers.Add("X-RateLimit-Limit", "60");
+                response.Headers.Add("X-RateLimit-Remaining", "0");
+                response.Headers.Add("X-RateLimit-Reset", DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeSeconds().ToString());
+                response.Headers.Add("X-RateLimit-Resource", "core");
+                return response;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }));
+
+        var client = new GhReleaseClient(httpClient);
+        var source = new SourceConfiguration
+        {
+            Id = "repo",
+            Repo = "owner/repo",
+            Tag = "latest"
+        };
+
+        var exception = await Assert.ThrowsAsync<GitHubRateLimitException>(() => client.GetReleaseAssetsAsync(source, CancellationToken.None));
+        Assert.Equal(HttpStatusCode.Forbidden, exception.StatusCode);
+        Assert.Equal(60, exception.Limit);
+        Assert.Equal(0, exception.Remaining);
+        Assert.Equal("core", exception.Scope);
+        Assert.NotNull(exception.ResetAtUtc);
     }
 
     public void Dispose()

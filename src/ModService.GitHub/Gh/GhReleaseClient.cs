@@ -147,6 +147,11 @@ public sealed class GhReleaseClient : IGitHubReleaseClient
             ? string.Empty
             : $"{Environment.NewLine}{detail.Trim()}";
 
+        if (IsRateLimitResponse(response))
+        {
+            throw CreateRateLimitException(response, source, trimmedDetail);
+        }
+
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
             var target = assetName is null ? $"release tag '{source.Tag}'" : $"asset '{assetName}'";
@@ -158,6 +163,32 @@ public sealed class GhReleaseClient : IGitHubReleaseClient
             $"GitHub request for '{source.Repo}' tag '{source.Tag}' failed with {(int)response.StatusCode} ({response.ReasonPhrase}).{trimmedDetail}");
     }
 
+    private static bool IsRateLimitResponse(HttpResponseMessage response)
+    {
+        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+        {
+            return true;
+        }
+
+        return response.StatusCode == HttpStatusCode.Forbidden &&
+               TryGetIntHeader(response, "X-RateLimit-Remaining") == 0;
+    }
+
+    private static GitHubRateLimitException CreateRateLimitException(
+        HttpResponseMessage response,
+        SourceConfiguration source,
+        string trimmedDetail)
+    {
+        return new GitHubRateLimitException(
+            $"GitHub API rate limit exceeded for '{source.Repo}' tag '{source.Tag}'.{trimmedDetail}",
+            response.StatusCode,
+            TryGetIntHeader(response, "X-RateLimit-Limit"),
+            TryGetIntHeader(response, "X-RateLimit-Remaining"),
+            TryGetUnixHeader(response, "X-RateLimit-Reset"),
+            GetRetryAfter(response),
+            TryGetStringHeader(response, "X-RateLimit-Resource"));
+    }
+
     private static HttpClient CreateHttpClient()
     {
         return new HttpClient(new SocketsHttpHandler
@@ -167,6 +198,63 @@ public sealed class GhReleaseClient : IGitHubReleaseClient
         {
             Timeout = TimeSpan.FromMinutes(5)
         };
+    }
+
+    private static int? TryGetIntHeader(HttpResponseMessage response, string name)
+    {
+        if (!response.Headers.TryGetValues(name, out var values))
+        {
+            return null;
+        }
+
+        var value = values.FirstOrDefault();
+        return int.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : null;
+    }
+
+    private static string? TryGetStringHeader(HttpResponseMessage response, string name)
+    {
+        if (!response.Headers.TryGetValues(name, out var values))
+        {
+            return null;
+        }
+
+        return values.FirstOrDefault();
+    }
+
+    private static DateTimeOffset? TryGetUnixHeader(HttpResponseMessage response, string name)
+    {
+        if (!response.Headers.TryGetValues(name, out var values))
+        {
+            return null;
+        }
+
+        var value = values.FirstOrDefault();
+        return long.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+            ? DateTimeOffset.FromUnixTimeSeconds(parsed)
+            : null;
+    }
+
+    private static TimeSpan? GetRetryAfter(HttpResponseMessage response)
+    {
+        var retryAfter = response.Headers.RetryAfter;
+        if (retryAfter is null)
+        {
+            return null;
+        }
+
+        if (retryAfter.Delta is { } delta)
+        {
+            return delta;
+        }
+
+        if (retryAfter.Date is { } date)
+        {
+            return date - DateTimeOffset.UtcNow;
+        }
+
+        return null;
     }
 
     private sealed class GitHubReleaseResponse

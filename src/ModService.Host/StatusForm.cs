@@ -474,7 +474,7 @@ public sealed class StatusForm : Form
             : $"Idle. Last completed: {completed}.";
 
         var cleanup = $"Cleanup: stale={snapshot.Cleanup.StaleFileCount}, locked={snapshot.Cleanup.LockedFileCount}, deleted={snapshot.Cleanup.Deleted}.";
-        return $"{state} {queueText} {snapshot.LastRefreshSummary} {cleanup}";
+        return $"{state} {queueText} {snapshot.LastRefreshSummary} {BuildGitHubText(snapshot.GitHub)} {cleanup}";
     }
 
     private static string BuildProcessText(RuntimeSnapshot snapshot)
@@ -483,6 +483,18 @@ public sealed class StatusForm : Form
             ? snapshot.LastActivationSummary
             : $"{snapshot.LastActivationSummary} ({snapshot.LastActivationAtUtc.Value.ToLocalTime():G})";
         return $"{snapshot.LastProcessScanSummary} Last activation: {activation}";
+    }
+
+    private static string BuildGitHubText(GitHubSyncStatusSnapshot status)
+    {
+        return status.State switch
+        {
+            "rate_limited" when status.RateLimit?.BackoffUntilUtc is { } backoffUntilUtc
+                => $"GitHub: rate limited until {backoffUntilUtc.ToLocalTime():G}.",
+            "error" when !string.IsNullOrWhiteSpace(status.Error)
+                => $"GitHub: error - {status.Error}",
+            _ => "GitHub: ready."
+        };
     }
 
     private static TextBox AddSummaryRow(TableLayoutPanel parent, int rowIndex, string title)

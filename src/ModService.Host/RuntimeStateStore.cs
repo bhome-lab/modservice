@@ -51,6 +51,59 @@ public sealed class RuntimeStateStore
             $"Refresh started ({reason})."));
     }
 
+    public void SetGitHubReady()
+    {
+        Update(snapshot => snapshot with
+        {
+            GitHub = new GitHubSyncStatusSnapshot
+            {
+                State = "ready"
+            }
+        });
+    }
+
+    public void SetGitHubRateLimited(
+        int? limit,
+        int? remaining,
+        DateTimeOffset? resetAtUtc,
+        DateTimeOffset backoffUntilUtc,
+        string? scope,
+        string? message)
+    {
+        Update(snapshot => AddEvent(
+            snapshot with
+            {
+                GitHub = new GitHubSyncStatusSnapshot
+                {
+                    State = "rate_limited",
+                    RateLimit = new GitHubRateLimitStatusSnapshot
+                    {
+                        Limit = limit,
+                        Remaining = remaining,
+                        ResetAtUtc = resetAtUtc,
+                        BackoffUntilUtc = backoffUntilUtc,
+                        Scope = scope,
+                        Message = string.IsNullOrWhiteSpace(message)
+                            ? "GitHub API rate limit exceeded."
+                            : message
+                    }
+                }
+            },
+            $"GitHub rate limit active until {backoffUntilUtc.ToLocalTime():G}."));
+    }
+
+    public void SetGitHubError(string message)
+    {
+        Update(snapshot => snapshot with
+        {
+            GitHub = new GitHubSyncStatusSnapshot
+            {
+                State = "error",
+                Error = message
+            }
+        });
+    }
+
     public void MarkRefreshCompleted(
         string reason,
         bool success,
@@ -163,6 +216,8 @@ public sealed record RuntimeSnapshot
 
     public IReadOnlyList<SourceStatusSnapshot> Sources { get; init; } = [];
 
+    public GitHubSyncStatusSnapshot GitHub { get; init; } = new();
+
     public CleanupStatusSnapshot Cleanup { get; init; } = new();
 
     public bool ProcessMonitoringEnabled { get; init; }
@@ -200,4 +255,28 @@ public sealed record CleanupStatusSnapshot
     public int LockedFileCount { get; init; }
 
     public bool Deleted { get; init; }
+}
+
+public sealed record GitHubSyncStatusSnapshot
+{
+    public string State { get; init; } = "ready";
+
+    public GitHubRateLimitStatusSnapshot? RateLimit { get; init; }
+
+    public string? Error { get; init; }
+}
+
+public sealed record GitHubRateLimitStatusSnapshot
+{
+    public int? Limit { get; init; }
+
+    public int? Remaining { get; init; }
+
+    public DateTimeOffset? ResetAtUtc { get; init; }
+
+    public DateTimeOffset? BackoffUntilUtc { get; init; }
+
+    public string? Scope { get; init; }
+
+    public string? Message { get; init; }
 }
