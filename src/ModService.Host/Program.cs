@@ -4,13 +4,12 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Console;
 using ModService.Core.Configuration;
 using ModService.Core.Matching;
 using ModService.Core.Updates;
 using ModService.GitHub.Auth;
 using ModService.GitHub.Gh;
+using Serilog;
 
 namespace ModService.Host;
 
@@ -19,6 +18,8 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        var paths = new ApplicationPaths();
+        Log.Logger = SerilogConfiguration.CreateBootstrapLogger(paths.LogsDirectory);
         StandardExceptionReporter.Install();
 
         using var singleInstance = new Mutex(initiallyOwned: true, @"Local\ModService.Tray", out var isFirstInstance);
@@ -36,7 +37,7 @@ internal static class Program
 
         try
         {
-            using var host = BuildHost(args);
+            using var host = BuildHost(args, paths);
             host.StartAsync().GetAwaiter().GetResult();
 
             try
@@ -58,9 +59,13 @@ internal static class Program
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }
+        finally
+        {
+            Log.CloseAndFlush();
+        }
     }
 
-    private static WebApplication BuildHost(string[] args)
+    private static WebApplication BuildHost(string[] args, ApplicationPaths paths)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -69,18 +74,16 @@ internal static class Program
         });
 
         builder.Configuration.AddJsonFile("modservice.json", optional: true, reloadOnChange: true);
-        builder.Logging.ClearProviders();
-        builder.Logging.AddSimpleConsole();
-        builder.Services.Configure<ConsoleLoggerOptions>(options =>
+        builder.Host.UseSerilog((context, _, loggerConfiguration) =>
         {
-            options.LogToStandardErrorThreshold = LogLevel.Warning;
+            SerilogConfiguration.Configure(loggerConfiguration, context.Configuration, paths.LogsDirectory);
         });
 
         builder.Services
             .AddOptions<ModServiceConfiguration>()
             .Bind(builder.Configuration.GetSection("ModService"));
 
-        builder.Services.AddSingleton<ApplicationPaths>();
+        builder.Services.AddSingleton(paths);
         builder.Services.AddSingleton(sp =>
         {
             var paths = sp.GetRequiredService<ApplicationPaths>();

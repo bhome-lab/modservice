@@ -1,5 +1,6 @@
 using System.Text;
 using System.Windows.Forms;
+using Serilog;
 
 namespace ModService.Host;
 
@@ -46,6 +47,14 @@ internal static class StandardExceptionReporter
             .Append(title).AppendLine()
             .AppendLine(exception.ToString())
             .ToString();
+
+        try
+        {
+            Log.Error(exception, "{ExceptionTitle}", title);
+        }
+        catch
+        {
+        }
 
         try
         {

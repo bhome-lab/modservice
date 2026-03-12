@@ -9,6 +9,7 @@ public sealed class ApplicationPaths
         ProgramDataRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "ModService");
+        LogsDirectory = Path.Combine(ProgramDataRoot, "logs");
     }
 
     public string BaseDirectory { get; }
@@ -16,4 +17,6 @@ public sealed class ApplicationPaths
     public string ConfigPath { get; }
 
     public string ProgramDataRoot { get; }
+
+    public string LogsDirectory { get; }
 }
