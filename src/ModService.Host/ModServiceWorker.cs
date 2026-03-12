@@ -12,8 +12,11 @@ public sealed class ModServiceWorker(
     RuntimeStateStore runtimeState,
     ILogger<ModServiceWorker> logger) : BackgroundService, IRefreshController
 {
+    private static readonly TimeSpan DefaultGitHubRateLimitBackoff = TimeSpan.FromMinutes(5);
+
     private readonly Channel<RefreshRequest> _refreshQueue = Channel.CreateUnbounded<RefreshRequest>();
     private int _queuedRefreshCount;
+    private GitHubRateLimitStatusSnapshot? _gitHubRateLimitStatus;
 
     public void QueueRefresh(string reason)
     {
@@ -73,10 +76,11 @@ public sealed class ModServiceWorker(
     private async Task RunRefreshAsync(string reason, CancellationToken cancellationToken)
     {
         runtimeState.MarkRefreshStarted(reason, Math.Max(0, Volatile.Read(ref _queuedRefreshCount)));
+        ModServiceConfiguration? configuration = null;
 
         try
         {
-            if (!configurationStore.TryGetCurrent(out var configuration))
+            if (!configurationStore.TryGetCurrent(out configuration))
             {
                 var configurationStatus = configurationStore.GetStatus();
                 var errorSummary = configurationStatus.ValidationErrors.Count == 0
@@ -95,7 +99,27 @@ public sealed class ModServiceWorker(
                 return;
             }
 
+            if (GetGitHubBackoffUntilUtc() is { } backoffUntilUtc && backoffUntilUtc > DateTimeOffset.UtcNow)
+            {
+                var retryAfterSeconds = GetRetryAfterSeconds(backoffUntilUtc);
+                var backoffSummary = $"Refresh skipped because GitHub rate-limit backoff is active for another {retryAfterSeconds} second(s).";
+                logger.LogWarning("{Summary}", backoffSummary);
+
+                runtimeState.MarkRefreshCompleted(
+                    reason,
+                    success: true,
+                    backoffSummary,
+                    error: null,
+                    TryResolveExecutorPath(configuration),
+                    BuildSourceStatuses(configuration),
+                    runtimeState.GetSnapshot().Cleanup);
+                return;
+            }
+
             var results = await syncService.SyncAsync(configuration, cancellationToken);
+            _gitHubRateLimitStatus = null;
+            runtimeState.SetGitHubReady();
+
             foreach (var result in results)
             {
                 logger.LogInformation(
@@ -129,8 +153,42 @@ public sealed class ModServiceWorker(
         {
             throw;
         }
+        catch (GitHubRateLimitException exception)
+        {
+            var nowUtc = DateTimeOffset.UtcNow;
+            var backoffUntilUtc = exception.GetBackoffUntilUtc(nowUtc, DefaultGitHubRateLimitBackoff);
+            _gitHubRateLimitStatus = new GitHubRateLimitStatusSnapshot
+            {
+                Limit = exception.Limit,
+                Remaining = exception.Remaining,
+                ResetAtUtc = exception.ResetAtUtc,
+                BackoffUntilUtc = backoffUntilUtc,
+                Scope = exception.Scope,
+                Message = exception.Message
+            };
+
+            runtimeState.SetGitHubRateLimited(
+                exception.Limit,
+                exception.Remaining,
+                exception.ResetAtUtc,
+                backoffUntilUtc,
+                exception.Scope,
+                exception.Message);
+
+            var summary = $"Refresh paused because the GitHub API rate limit was exceeded. Backoff until {backoffUntilUtc.ToLocalTime():G}.";
+            logger.LogWarning(exception, "{Summary}", summary);
+            runtimeState.MarkRefreshCompleted(
+                reason,
+                success: true,
+                summary,
+                error: null,
+                TryResolveExecutorPath(configuration!),
+                BuildSourceStatuses(configuration!),
+                cleanup: runtimeState.GetSnapshot().Cleanup);
+        }
         catch (Exception exception)
         {
+            runtimeState.SetGitHubError(exception.Message);
             logger.LogError(exception, "Refresh failed for reason {Reason}.", reason);
             runtimeState.MarkRefreshCompleted(
                 reason,
@@ -142,6 +200,12 @@ public sealed class ModServiceWorker(
                 cleanup: new CleanupStatusSnapshot());
         }
     }
+
+    private DateTimeOffset? GetGitHubBackoffUntilUtc()
+        => _gitHubRateLimitStatus?.BackoffUntilUtc;
+
+    private static int GetRetryAfterSeconds(DateTimeOffset backoffUntilUtc)
+        => Math.Max(0, (int)Math.Ceiling((backoffUntilUtc - DateTimeOffset.UtcNow).TotalSeconds));
 
     private IReadOnlyList<SourceStatusSnapshot> BuildSourceStatuses(ModServiceConfiguration configuration)
     {

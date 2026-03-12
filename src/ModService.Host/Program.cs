@@ -1,5 +1,6 @@
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -59,9 +60,9 @@ internal static class Program
         }
     }
 
-    private static IHost BuildHost(string[] args)
+    private static WebApplication BuildHost(string[] args)
     {
-        var builder = new HostApplicationBuilder(new HostApplicationBuilderSettings
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             Args = args,
             ContentRootPath = AppContext.BaseDirectory
@@ -105,6 +106,48 @@ internal static class Program
         builder.Services.AddHostedService(sp => sp.GetRequiredService<ModServiceWorker>());
         builder.Services.AddHostedService<ProcessWatchWorker>();
 
-        return builder.Build();
+        var app = builder.Build();
+        app.Urls.Clear();
+        app.Urls.Add(ResolveHttpListenUrl(app.Configuration));
+        app.MapModServiceApi();
+        return app;
+    }
+
+    private static string ResolveHttpListenUrl(IConfiguration configuration)
+    {
+        var configuredValue = configuration["ModService:Http:ListenUrl"];
+        return IsValidListenUrl(configuredValue)
+            ? configuredValue!
+            : new HttpApiConfiguration().ListenUrl;
+    }
+
+    private static bool IsValidListenUrl(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(uri.AbsolutePath) && !string.Equals(uri.AbsolutePath, "/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return uri.Port > 0;
     }
 }

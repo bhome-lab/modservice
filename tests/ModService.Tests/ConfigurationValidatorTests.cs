@@ -9,6 +9,10 @@ public sealed class ConfigurationValidatorTests
     {
         var configuration = new ModServiceConfiguration
         {
+            Http = new HttpApiConfiguration
+            {
+                ListenUrl = "http://127.0.0.1:5047"
+            },
             Executor = new ExecutorConfiguration
             {
                 Source = "mods",
@@ -41,5 +45,36 @@ public sealed class ConfigurationValidatorTests
         Assert.Contains(errors, error => error.Contains("empty pattern", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(errors, error => error.Contains("duplicate archive asset 'bundle.zip'", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(errors, error => error.Contains("duplicate option 'mode'", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Validate_RejectsInvalidHttpListenUrl()
+    {
+        var configuration = new ModServiceConfiguration
+        {
+            Http = new HttpApiConfiguration
+            {
+                ListenUrl = "https://localhost/api"
+            },
+            Executor = new ExecutorConfiguration
+            {
+                Source = "mods",
+                Asset = "injector.dll"
+            },
+            Sources =
+            [
+                new SourceConfiguration
+                {
+                    Id = "mods",
+                    Repo = "owner/repo",
+                    Tag = "stable"
+                }
+            ]
+        };
+
+        var errors = ConfigurationValidator.Validate(configuration);
+
+        Assert.Contains(errors, error => error.Contains("http scheme", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(errors, error => error.Contains("must not include a path", StringComparison.OrdinalIgnoreCase));
     }
 }
