@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using System.Text.Json.Serialization;
 using ModService.Core.Configuration;
 using ModService.Core.Matching;
 using ModService.Core.Updates;
@@ -181,6 +182,7 @@ public static class HttpApiEndpoints
         ServiceResponse Service,
         ConfigurationResponse Configuration,
         RefreshResponse Refresh,
+        [property: JsonPropertyName("github")]
         GitHubResponse GitHub,
         ExecutorResponse Executor,
         CleanupResponse Cleanup,
