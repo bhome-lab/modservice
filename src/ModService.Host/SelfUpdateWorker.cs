@@ -11,6 +11,7 @@ public sealed class SelfUpdateWorker(
     {
         try
         {
+            logger.LogInformation("Running startup self-update check.");
             await selfUpdateService.CheckForUpdatesAsync("startup", stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
