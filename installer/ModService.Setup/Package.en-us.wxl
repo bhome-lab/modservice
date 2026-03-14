@@ -1,0 +1,13 @@
+<WixLocalization
+  xmlns="http://wixtoolset.org/schemas/v4/wxl"
+  Culture="en-US"
+  Codepage="1252">
+  <String Id="WelcomeDlgDescription" Value="This wizard installs the full published ModService application for all users. Click Next to choose the installation folder or Cancel to exit setup." />
+  <String Id="InstallDirDlgDescription" Value="Choose where the full published ModService payload should be installed." />
+  <String Id="VerifyReadyDlgInstallTitle" Value="{\WixUI_Font_Title}Ready to install ModService" />
+  <String Id="VerifyReadyDlgInstallText" Value="Setup will copy the current published application payload, create a Start Menu shortcut, and keep any existing modservice.json file in place during future upgrades." />
+  <String Id="VerifyReadyDlgUpdateTitle" Value="{\WixUI_Font_Title}Ready to update ModService" />
+  <String Id="VerifyReadyDlgUpdateText" Value="Setup will replace the installed application payload with the current published build and preserve your existing modservice.json file." />
+  <String Id="MaintenanceWelcomeDlgDescription" Value="ModService is already installed. Choose Change to repair or update the installed payload, or Remove to uninstall it." />
+  <String Id="ExitDialogDescription" Value="Click Finish to exit setup. You can launch ModService immediately or later from the Start Menu." />
+</WixLocalization>

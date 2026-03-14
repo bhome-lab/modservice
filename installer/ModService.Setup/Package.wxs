@@ -11,6 +11,17 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" />
     <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#MainExecutableFile]" />
+
+    <Icon Id="ProductIcon" SourceFile="$(var.PublishDir)\ModService.Host.exe" />
+    <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
+
+    <CustomAction
+      Id="LaunchApplication"
+      BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+      DllEntry="WixShellExec"
+      Impersonate="yes"
+      Return="ignore" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="ModService">
@@ -38,9 +49,39 @@
       </Directory>
     </StandardDirectory>
 
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuModServiceFolder" Name="ModService">
+        <Component Id="StartMenuShortcutComponent" Guid="*" Bitness="always64">
+          <Shortcut
+            Id="StartMenuShortcut"
+            Name="ModService"
+            Description="Launch ModService"
+            Target="[INSTALLFOLDER]ModService.exe"
+            WorkingDirectory="INSTALLFOLDER" />
+          <CreateFolder />
+          <RemoveFolder Id="RemoveProgramMenuModServiceFolder" On="uninstall" />
+          <RegistryValue
+            Root="HKCU"
+            Key="Software\ModService"
+            Name="StartMenuShortcut"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <UIRef Id="ModService_InstallDir" />
+
     <Feature Id="MainFeature" Title="ModService" Level="1">
       <ComponentRef Id="MainExecutableComponent" />
       <ComponentRef Id="ConfigComponent" />
+      <ComponentRef Id="StartMenuShortcutComponent" />
+      <Files Include="$(var.PublishDir)\**\*" Directory="INSTALLFOLDER">
+        <Exclude Files="$(var.PublishDir)\ModService.Host.exe" />
+        <Exclude Files="$(var.PublishDir)\modservice.json" />
+        <Exclude Files="$(var.PublishDir)\**\*.pdb" />
+      </Files>
     </Feature>
   </Package>
 </Wix>

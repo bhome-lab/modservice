@@ -127,9 +127,12 @@ Invoke-Step -Description 'Build MSI installer' -Action {
     }
 }
 
-$installerPath = Join-Path $installerOutputDirectory 'ModService-win-x64.msi'
-if (-not (Test-Path $installerPath)) {
-    throw "Expected MSI was not produced: $installerPath"
+$installerPath = Get-ChildItem $installerOutputDirectory -Recurse -Filter 'ModService-win-x64.msi' |
+    Sort-Object FullName |
+    Select-Object -First 1 -ExpandProperty FullName
+
+if ([string]::IsNullOrWhiteSpace($installerPath) -or -not (Test-Path $installerPath)) {
+    throw "Expected MSI was not produced under: $installerOutputDirectory"
 }
 
 Copy-Item $installerPath (Join-Path $assetsRoot 'ModService-win-x64.msi') -Force
