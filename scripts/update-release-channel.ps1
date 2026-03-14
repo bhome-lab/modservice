@@ -55,7 +55,8 @@ try {
         '--repo', $Repo,
         '--target', $Target,
         '--title', $Title,
-        '--notes', $Notes
+        '--notes', $Notes,
+        '--latest'
     )
 
     & gh @createArguments
@@ -76,6 +77,11 @@ try {
     & gh release upload $ChannelTag @assetPaths --repo $Repo --clobber
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to upload assets to channel release '$ChannelTag'."
+    }
+
+    & gh release edit $ChannelTag --repo $Repo --draft=false --latest --title $Title --notes $Notes
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to publish channel release '$ChannelTag'."
     }
 }
 finally {

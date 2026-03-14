@@ -67,6 +67,7 @@ public sealed class GitHubTokenStore
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(CreateDirectoryRule(WellKnownSidType.LocalSystemSid));
         security.AddAccessRule(CreateDirectoryRule(WellKnownSidType.BuiltinAdministratorsSid));
+        TryAddCurrentUserDirectoryRule(security);
         new DirectoryInfo(directory).SetAccessControl(security);
     }
 
@@ -81,6 +82,7 @@ public sealed class GitHubTokenStore
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(CreateFileRule(WellKnownSidType.LocalSystemSid));
         security.AddAccessRule(CreateFileRule(WellKnownSidType.BuiltinAdministratorsSid));
+        TryAddCurrentUserFileRule(security);
         new FileInfo(filePath).SetAccessControl(security);
     }
 
@@ -104,5 +106,37 @@ public sealed class GitHubTokenStore
             InheritanceFlags.None,
             PropagationFlags.None,
             AccessControlType.Allow);
+    }
+
+    private static void TryAddCurrentUserDirectoryRule(DirectorySecurity security)
+    {
+        var sid = WindowsIdentity.GetCurrent().User;
+        if (sid is null)
+        {
+            return;
+        }
+
+        security.AddAccessRule(new FileSystemAccessRule(
+            sid,
+            FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+    }
+
+    private static void TryAddCurrentUserFileRule(FileSecurity security)
+    {
+        var sid = WindowsIdentity.GetCurrent().User;
+        if (sid is null)
+        {
+            return;
+        }
+
+        security.AddAccessRule(new FileSystemAccessRule(
+            sid,
+            FileSystemRights.FullControl,
+            InheritanceFlags.None,
+            PropagationFlags.None,
+            AccessControlType.Allow));
     }
 }

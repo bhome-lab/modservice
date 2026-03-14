@@ -71,7 +71,7 @@
       </Directory>
     </StandardDirectory>
 
-    <UIRef Id="ModService_InstallDir" />
+    <UIRef Id="ModService_InstallDir_X64" />
 
     <Feature Id="MainFeature" Title="ModService" Level="1">
       <ComponentRef Id="MainExecutableComponent" />

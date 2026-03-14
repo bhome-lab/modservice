@@ -90,7 +90,8 @@ jobs:
                   'release', 'create', $tag,
                   '--repo', $repo,
                   '--title', $tag,
-                  '--notes', 'Automated release build.'
+                  '--notes', 'Automated release build.',
+                  '--latest=false'
               )
 
               if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
@@ -105,6 +106,23 @@ jobs:
               if ($LASTEXITCODE -ne 0) {
                   throw "gh release create failed for $tag"
               }
+          }
+
+          $editArguments = @(
+              'release', 'edit', $tag,
+              '--repo', $repo,
+              '--draft=false',
+              '--title', $tag,
+              '--notes', 'Automated release build.'
+          )
+
+          if ($env:RELEASE_PRERELEASE -eq 'true') {
+              $editArguments += '--prerelease'
+          }
+
+          & gh @editArguments
+          if ($LASTEXITCODE -ne 0) {
+              throw "gh release edit failed for $tag"
           }
 
       - name: Upload release assets
