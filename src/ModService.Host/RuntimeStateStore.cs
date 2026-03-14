@@ -128,27 +128,22 @@ public sealed class RuntimeStateStore
             success ? summary : $"Refresh failed ({reason}): {error ?? summary}"));
     }
 
-    public void MarkProcessScan(
+    public void SetProcessMonitoringStatus(
         bool enabled,
-        int accessibleProcessCount,
-        int inaccessibleProcessCount,
-        string? inaccessibleSummary)
+        string summary,
+        int visibleProcessCount = 0,
+        int inaccessibleProcessCount = 0)
     {
-        var summary = !enabled
-            ? "Process monitoring is disabled."
-            : inaccessibleProcessCount == 0
-                ? $"Scanned {accessibleProcessCount} processes."
-                : $"Scanned {accessibleProcessCount} processes; skipped {inaccessibleProcessCount} inaccessible process entries.";
-
-        if (!string.IsNullOrWhiteSpace(inaccessibleSummary))
-        {
-            summary = $"{summary} {inaccessibleSummary}";
-        }
+        summary = string.IsNullOrWhiteSpace(summary)
+            ? enabled
+                ? "Watching new process start/stop events only."
+                : "Process monitoring is disabled."
+            : summary;
 
         Update(snapshot => snapshot with
         {
             ProcessMonitoringEnabled = enabled,
-            VisibleProcessCount = Math.Max(0, accessibleProcessCount),
+            VisibleProcessCount = Math.Max(0, visibleProcessCount),
             InaccessibleProcessCount = Math.Max(0, inaccessibleProcessCount),
             LastProcessScanAtUtc = DateTimeOffset.UtcNow,
             LastProcessScanSummary = summary

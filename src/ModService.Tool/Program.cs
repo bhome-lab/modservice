@@ -188,7 +188,7 @@ internal sealed class ToolApplication
         Console.WriteLine($"Token store: {tokenStore.FilePath}");
         Console.WriteLine($"Token present: {tokenStore.HasToken()}");
         Console.WriteLine($"Polling: {configuration.Polling.IntervalSeconds}s + up to {configuration.Polling.JitterSeconds}s jitter");
-        Console.WriteLine($"Process monitoring: enabled={configuration.ProcessMonitoring.Enabled}, scan={configuration.ProcessMonitoring.ScanIntervalSeconds}s");
+        Console.WriteLine($"Process monitoring: enabled={configuration.ProcessMonitoring.Enabled}, retry={configuration.ProcessMonitoring.ScanIntervalSeconds}s");
 
         foreach (var source in configuration.Sources)
         {

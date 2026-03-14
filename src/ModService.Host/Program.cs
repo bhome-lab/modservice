@@ -104,6 +104,7 @@ internal static class Program
         builder.Services.AddSingleton<StartupTaskService>();
         builder.Services.AddSingleton<TrayPreferencesStore>();
         builder.Services.AddSingleton<NotificationRequestQueue>();
+        builder.Services.AddSingleton<IProcessEventSource, WmiProcessEventSource>();
         builder.Services.AddSingleton<ModServiceWorker>();
         builder.Services.AddSingleton<IRefreshController>(sp => sp.GetRequiredService<ModServiceWorker>());
         builder.Services.AddHostedService(sp => sp.GetRequiredService<ModServiceWorker>());
