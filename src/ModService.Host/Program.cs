@@ -10,6 +10,7 @@ using ModService.Core.Updates;
 using ModService.GitHub.Auth;
 using ModService.GitHub.Gh;
 using Serilog;
+using Velopack;
 
 namespace ModService.Host;
 
@@ -19,6 +20,15 @@ internal static class Program
     private static void Main(string[] args)
     {
         var paths = new ApplicationPaths();
+        VelopackApp.Build()
+            .SetAutoApplyOnStartup(false)
+            // Tray startup should never continue during installer/updater hook invocations.
+            .OnAfterInstallFastCallback(_ => { })
+            .OnBeforeUpdateFastCallback(_ => { })
+            .OnAfterUpdateFastCallback(_ => { })
+            .OnBeforeUninstallFastCallback(_ => { })
+            .Run();
+
         Log.Logger = SerilogConfiguration.CreateBootstrapLogger(paths.LogsDirectory);
         StandardExceptionReporter.Install();
 
@@ -73,7 +83,7 @@ internal static class Program
             ContentRootPath = AppContext.BaseDirectory
         });
 
-        builder.Configuration.AddJsonFile("modservice.json", optional: true, reloadOnChange: true);
+        builder.Configuration.AddJsonFile(paths.ConfigPath, optional: true, reloadOnChange: true);
         builder.Host.UseSerilog((context, _, loggerConfiguration) =>
         {
             SerilogConfiguration.Configure(loggerConfiguration, context.Configuration, paths.LogsDirectory);
@@ -104,11 +114,13 @@ internal static class Program
         builder.Services.AddSingleton<StartupTaskService>();
         builder.Services.AddSingleton<TrayPreferencesStore>();
         builder.Services.AddSingleton<NotificationRequestQueue>();
+        builder.Services.AddSingleton<SelfUpdateService>();
         builder.Services.AddSingleton<IProcessEventSource, WmiProcessEventSource>();
         builder.Services.AddSingleton<ModServiceWorker>();
         builder.Services.AddSingleton<IRefreshController>(sp => sp.GetRequiredService<ModServiceWorker>());
         builder.Services.AddHostedService(sp => sp.GetRequiredService<ModServiceWorker>());
         builder.Services.AddHostedService<ProcessWatchWorker>();
+        builder.Services.AddHostedService<SelfUpdateWorker>();
 
         var app = builder.Build();
         app.Urls.Clear();

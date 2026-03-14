@@ -27,6 +27,7 @@
     <ProjectReference Include="..\..\src\ModService.Interop\ModService.Interop.csproj" />
     <ProjectReference Include="..\..\src\ModService.GitHub\ModService.GitHub.csproj" />
     <ProjectReference Include="..\..\src\ModService.Host\ModService.Host.csproj" />
+    <ProjectReference Include="..\..\src\ModService.SetupLauncher\ModService.SetupLauncher.csproj" />
   </ItemGroup>
 
   <ItemGroup>

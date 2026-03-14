@@ -12,6 +12,7 @@ public sealed class StatusForm : Form
     private readonly StartupTaskService _startupTaskService;
     private readonly TrayPreferencesStore _preferencesStore;
     private readonly GitHubTokenManager _tokenManager;
+    private readonly SelfUpdateService _selfUpdateService;
     private readonly ApplicationPaths _paths;
     private readonly System.Windows.Forms.Timer _refreshTimer;
 
@@ -19,16 +20,20 @@ public sealed class StatusForm : Form
     private readonly TextBox _configStatusValue;
     private readonly TextBox _startupValue;
     private readonly TextBox _tokenValue;
+    private readonly TextBox _selfUpdateValue;
     private readonly TextBox _refreshValue;
     private readonly TextBox _executorValue;
     private readonly TextBox _processValue;
     private readonly CheckBox _startupCheckBox;
     private readonly CheckBox _notificationsCheckBox;
+    private readonly Button _checkForUpdatesButton;
+    private readonly Button _installUpdateButton;
     private readonly ListView _sourcesList;
     private readonly TextBox _configErrorsTextBox;
     private readonly TextBox _eventsTextBox;
 
     private bool _updatingToggles;
+    private bool _updateActionInProgress;
 
     public StatusForm(
         RuntimeStateStore runtimeState,
@@ -37,6 +42,7 @@ public sealed class StatusForm : Form
         StartupTaskService startupTaskService,
         TrayPreferencesStore preferencesStore,
         GitHubTokenManager tokenManager,
+        SelfUpdateService selfUpdateService,
         ApplicationPaths paths)
     {
         _runtimeState = runtimeState;
@@ -45,6 +51,7 @@ public sealed class StatusForm : Form
         _startupTaskService = startupTaskService;
         _preferencesStore = preferencesStore;
         _tokenManager = tokenManager;
+        _selfUpdateService = selfUpdateService;
         _paths = paths;
 
         Text = "ModService Status";
@@ -70,7 +77,7 @@ public sealed class StatusForm : Form
         {
             Dock = DockStyle.Top,
             ColumnCount = 2,
-            RowCount = 7,
+            RowCount = 8,
             AutoSize = true
         };
         summaryGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
@@ -85,9 +92,10 @@ public sealed class StatusForm : Form
         _configStatusValue = AddSummaryRow(summaryGrid, 1, "Config Status");
         _startupValue = AddSummaryRow(summaryGrid, 2, "Startup");
         _tokenValue = AddSummaryRow(summaryGrid, 3, "GitHub Token");
-        _refreshValue = AddSummaryRow(summaryGrid, 4, "Refresh");
-        _executorValue = AddSummaryRow(summaryGrid, 5, "Executor");
-        _processValue = AddSummaryRow(summaryGrid, 6, "Process Watch");
+        _selfUpdateValue = AddSummaryRow(summaryGrid, 4, "Self Update");
+        _refreshValue = AddSummaryRow(summaryGrid, 5, "Refresh");
+        _executorValue = AddSummaryRow(summaryGrid, 6, "Executor");
+        _processValue = AddSummaryRow(summaryGrid, 7, "Process Watch");
 
         var actionsPanel = new FlowLayoutPanel
         {
@@ -105,6 +113,23 @@ public sealed class StatusForm : Form
         };
         queueRefreshButton.Click += (_, _) => _refreshController.QueueRefresh("status-window");
         actionsPanel.Controls.Add(queueRefreshButton);
+
+        _checkForUpdatesButton = new Button
+        {
+            Text = "Check For Updates",
+            AutoSize = true
+        };
+        _checkForUpdatesButton.Click += async (_, _) => await TriggerManualUpdateCheckAsync();
+        actionsPanel.Controls.Add(_checkForUpdatesButton);
+
+        _installUpdateButton = new Button
+        {
+            Text = "Restart To Update",
+            AutoSize = true,
+            Enabled = false
+        };
+        _installUpdateButton.Click += async (_, _) => await ApplyPreparedUpdateAsync();
+        actionsPanel.Controls.Add(_installUpdateButton);
 
         var openConfigButton = new Button
         {
@@ -218,6 +243,7 @@ public sealed class StatusForm : Form
         _configPathValue.Text = _paths.ConfigPath;
         _configStatusValue.Text = BuildConfigurationStatusText(configuration);
         _tokenValue.Text = BuildTokenText();
+        _selfUpdateValue.Text = BuildSelfUpdateText(runtime.SelfUpdate);
         _refreshValue.Text = BuildRefreshText(runtime);
         _executorValue.Text = runtime.ExecutorPath ?? "Executor not available yet.";
         _processValue.Text = BuildProcessText(runtime);
@@ -244,6 +270,14 @@ public sealed class StatusForm : Form
         {
             _updatingToggles = false;
         }
+
+        _checkForUpdatesButton.Enabled = !_updateActionInProgress &&
+            runtime.SelfUpdate.State is not "checking" and not "downloading" and not "applying";
+        _installUpdateButton.Enabled = !_updateActionInProgress &&
+            !string.IsNullOrWhiteSpace(runtime.SelfUpdate.PreparedVersion);
+        _installUpdateButton.Text = string.IsNullOrWhiteSpace(runtime.SelfUpdate.PreparedVersion)
+            ? "Restart To Update"
+            : $"Restart To Update ({runtime.SelfUpdate.PreparedVersion})";
 
         _sourcesList.BeginUpdate();
         try
@@ -327,7 +361,7 @@ public sealed class StatusForm : Form
                 FileName = "notepad.exe",
                 Arguments = $"\"{_paths.ConfigPath}\"",
                 UseShellExecute = true,
-                WorkingDirectory = _paths.BaseDirectory
+                WorkingDirectory = Path.GetDirectoryName(_paths.ConfigPath) ?? _paths.BaseDirectory
             });
         }
         catch (Exception exception)
@@ -448,6 +482,71 @@ public sealed class StatusForm : Form
         }
     }
 
+    private async Task TriggerManualUpdateCheckAsync()
+    {
+        if (_updateActionInProgress)
+        {
+            return;
+        }
+
+        _updateActionInProgress = true;
+        RefreshView();
+
+        try
+        {
+            await _selfUpdateService.CheckForUpdatesAsync("manual", CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                this,
+                exception.Message,
+                "ModService",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _updateActionInProgress = false;
+            RefreshView();
+        }
+    }
+
+    private async Task ApplyPreparedUpdateAsync()
+    {
+        if (_updateActionInProgress)
+        {
+            return;
+        }
+
+        _updateActionInProgress = true;
+        RefreshView();
+
+        try
+        {
+            var launched = await _selfUpdateService.ApplyPreparedUpdateAndRestartAsync(CancellationToken.None);
+            if (launched)
+            {
+                Application.Exit();
+                return;
+            }
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                this,
+                exception.Message,
+                "ModService",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _updateActionInProgress = false;
+            RefreshView();
+        }
+    }
+
     private static string BuildConfigurationStatusText(ConfigurationStatusSnapshot status)
     {
         if (status.HasConfiguration)
@@ -495,6 +594,16 @@ public sealed class StatusForm : Form
                 => $"GitHub: error - {status.Error}",
             _ => "GitHub: ready."
         };
+    }
+
+    private static string BuildSelfUpdateText(SelfUpdateStatusSnapshot status)
+    {
+        var checkedAt = status.LastCheckedAtUtc?.ToLocalTime().ToString("G") ?? "never";
+        var source = string.IsNullOrWhiteSpace(status.Source) ? "n/a" : status.Source;
+        var current = string.IsNullOrWhiteSpace(status.CurrentVersion) ? "unknown" : status.CurrentVersion;
+        var available = string.IsNullOrWhiteSpace(status.AvailableVersion) ? "none" : status.AvailableVersion;
+        var prepared = string.IsNullOrWhiteSpace(status.PreparedVersion) ? "none" : status.PreparedVersion;
+        return $"State: {status.State}. Current: {current}. Available: {available}. Prepared: {prepared}. Last check: {checkedAt}. Source: {source}. {status.Message}";
     }
 
     private static TextBox AddSummaryRow(TableLayoutPanel parent, int rowIndex, string title)

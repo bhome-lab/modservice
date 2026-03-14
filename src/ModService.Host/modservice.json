@@ -1,11 +1,12 @@
 {
   "ModService": {
-    "polling": {
-      "intervalSeconds": 5,
-      "jitterSeconds": 2
-    },
     "http": {
       "listenUrl": "http://127.0.0.1:5047"
+    },
+    "selfUpdate": {
+      "enabled": true,
+      "repoUrl": "https://github.com/bhome-lab/modservice",
+      "restartDelaySeconds": 5
     },
     "processMonitoring": {
       "enabled": true,
@@ -45,7 +46,7 @@
           }
         ],
         "applyEnvironment": {
-          "MODSERVICE_SAMPLE_MARKER": "service-sample-marker",
+          "MODSERVICE_SAMPLE_MARKER": "tray-sample-marker",
           "MODSERVICE_SAMPLE_OUTPUT": "C:\\ProgramData\\ModService\\sample-output.txt"
         }
       }

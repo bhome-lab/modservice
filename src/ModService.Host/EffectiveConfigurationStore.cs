@@ -7,8 +7,6 @@ namespace ModService.Host;
 
 public sealed class EffectiveConfigurationStore : IDisposable
 {
-    private static readonly TimeSpan InvalidConfigurationRetryDelay = TimeSpan.FromSeconds(5);
-
     private readonly object _gate = new();
     private readonly IDisposable? _subscription;
     private readonly ILogger<EffectiveConfigurationStore> _logger;
@@ -42,21 +40,11 @@ public sealed class EffectiveConfigurationStore : IDisposable
         }
     }
 
-    public TimeSpan GetSyncDelay()
-    {
-        if (!TryGetCurrent(out var configuration))
-        {
-            return InvalidConfigurationRetryDelay;
-        }
-
-        return PollingDelayCalculator.ComputeNextDelay(configuration.Polling);
-    }
-
     public TimeSpan GetProcessScanDelay()
     {
         if (!TryGetCurrent(out var configuration))
         {
-            return InvalidConfigurationRetryDelay;
+            return TimeSpan.FromSeconds(5);
         }
 
         return TimeSpan.FromSeconds(Math.Max(1, configuration.ProcessMonitoring.ScanIntervalSeconds));
@@ -117,14 +105,12 @@ public sealed class EffectiveConfigurationStore : IDisposable
         }
 
         _logger.LogInformation(
-            "Accepted configuration {Reason}: executor {ExecutorSource}/{ExecutorAsset}, {SourceCount} sources, {RuleCount} rules, polling {IntervalSeconds}s+{JitterSeconds}s jitter.",
+            "Accepted configuration {Reason}: executor {ExecutorSource}/{ExecutorAsset}, {SourceCount} sources, {RuleCount} rules.",
             reason,
             candidate.Executor.Source,
             candidate.Executor.Asset,
             candidate.Sources.Count,
-            candidate.Rules.Count,
-            candidate.Polling.IntervalSeconds,
-            candidate.Polling.JitterSeconds);
+            candidate.Rules.Count);
     }
 }
 

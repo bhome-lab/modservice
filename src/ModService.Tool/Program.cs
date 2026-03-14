@@ -187,7 +187,7 @@ internal sealed class ToolApplication
 
         Console.WriteLine($"Token store: {tokenStore.FilePath}");
         Console.WriteLine($"Token present: {tokenStore.HasToken()}");
-        Console.WriteLine($"Polling: {configuration.Polling.IntervalSeconds}s + up to {configuration.Polling.JitterSeconds}s jitter");
+        Console.WriteLine($"Self-update: enabled={configuration.SelfUpdate.Enabled}, source={(string.IsNullOrWhiteSpace(configuration.SelfUpdate.FeedPath) ? configuration.SelfUpdate.RepoUrl : configuration.SelfUpdate.FeedPath)}");
         Console.WriteLine($"Process monitoring: enabled={configuration.ProcessMonitoring.Enabled}, retry={configuration.ProcessMonitoring.ScanIntervalSeconds}s");
 
         foreach (var source in configuration.Sources)
@@ -377,7 +377,7 @@ internal sealed class ToolApplication
     {
         private readonly Dictionary<string, List<string>> _values = new(StringComparer.OrdinalIgnoreCase);
 
-        public string ConfigPath => GetValue("--config") ?? Path.Combine(Environment.CurrentDirectory, "src", "ModService.Host", "modservice.json");
+        public string ConfigPath => GetValue("--config") ?? ResolveDefaultConfigPath();
 
         public string CacheRoot => GetValue("--cache") ?? Path.Combine(Environment.CurrentDirectory, "artifacts", "cache");
 
@@ -408,6 +408,18 @@ internal sealed class ToolApplication
             }
 
             return options;
+        }
+
+        private static string ResolveDefaultConfigPath()
+        {
+            var installedPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ModService",
+                "modservice.json");
+
+            return File.Exists(installedPath)
+                ? installedPath
+                : Path.Combine(Environment.CurrentDirectory, "src", "ModService.Host", "modservice.json");
         }
 
         public bool HasFlag(string key)

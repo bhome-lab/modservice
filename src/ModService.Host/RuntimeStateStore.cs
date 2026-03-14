@@ -161,6 +161,21 @@ public sealed class RuntimeStateStore
             summary));
     }
 
+    public void SetSelfUpdateStatus(SelfUpdateStatusSnapshot status, string? eventMessage = null)
+    {
+        Update(snapshot =>
+        {
+            var updated = snapshot with
+            {
+                SelfUpdate = status
+            };
+
+            return string.IsNullOrWhiteSpace(eventMessage)
+                ? updated
+                : AddEvent(updated, eventMessage);
+        });
+    }
+
     private void Update(Func<RuntimeSnapshot, RuntimeSnapshot> updater)
     {
         lock (_gate)
@@ -197,13 +212,13 @@ public sealed record RuntimeSnapshot
 
     public int QueuedRefreshCount { get; init; }
 
-    public string LastRefreshReason { get; init; } = "startup";
+    public string LastRefreshReason { get; init; } = "manual";
 
     public DateTimeOffset? LastRefreshStartedAtUtc { get; init; }
 
     public DateTimeOffset? LastRefreshCompletedAtUtc { get; init; }
 
-    public string LastRefreshSummary { get; init; } = "Waiting for first refresh.";
+    public string LastRefreshSummary { get; init; } = "Waiting for a manual refresh.";
 
     public string? LastRefreshError { get; init; }
 
@@ -228,6 +243,8 @@ public sealed record RuntimeSnapshot
     public DateTimeOffset? LastActivationAtUtc { get; init; }
 
     public string LastActivationSummary { get; init; } = "No process activations yet.";
+
+    public SelfUpdateStatusSnapshot SelfUpdate { get; init; } = new();
 
     public IReadOnlyList<string> RecentEvents { get; init; } = [];
 }
@@ -274,4 +291,23 @@ public sealed record GitHubRateLimitStatusSnapshot
     public string? Scope { get; init; }
 
     public string? Message { get; init; }
+}
+
+public sealed record SelfUpdateStatusSnapshot
+{
+    public string State { get; init; } = "disabled";
+
+    public string? Source { get; init; }
+
+    public string? CurrentVersion { get; init; }
+
+    public string? AvailableVersion { get; init; }
+
+    public string? PreparedVersion { get; init; }
+
+    public int? DownloadProgressPercent { get; init; }
+
+    public DateTimeOffset? LastCheckedAtUtc { get; init; }
+
+    public string Message { get; init; } = "Self-update is disabled.";
 }

@@ -10,6 +10,7 @@ public sealed class ModServiceWorker(
     EffectiveConfigurationStore configurationStore,
     SourceSyncService syncService,
     RuntimeStateStore runtimeState,
+    SelfUpdateService selfUpdateService,
     ILogger<ModServiceWorker> logger) : BackgroundService, IRefreshController
 {
     private static readonly TimeSpan DefaultGitHubRateLimitBackoff = TimeSpan.FromMinutes(5);
@@ -23,48 +24,19 @@ public sealed class ModServiceWorker(
         var queuedRefreshCount = Interlocked.Increment(ref _queuedRefreshCount);
         runtimeState.MarkRefreshQueued(reason, queuedRefreshCount);
         _refreshQueue.Writer.TryWrite(new RefreshRequest(reason));
+        _ = TriggerManualSelfUpdateCheckAsync(reason);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await RunRefreshAsync("startup", stoppingToken);
-
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                var nextDelay = configurationStore.GetSyncDelay();
-                logger.LogInformation(
-                    "Next sync scheduled in {DelaySeconds} seconds.",
-                    (int)nextDelay.TotalSeconds);
-
-                using var manualRefreshCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                var scheduledRefreshTask = Task.Delay(nextDelay, stoppingToken);
-                var manualRefreshTask = _refreshQueue.Reader.ReadAsync(manualRefreshCts.Token).AsTask();
-
-                var completedTask = await Task.WhenAny(scheduledRefreshTask, manualRefreshTask);
-                if (completedTask == manualRefreshTask)
-                {
-                    var request = await manualRefreshTask;
-                    manualRefreshCts.Cancel();
-
-                    var remaining = Math.Max(0, Interlocked.Decrement(ref _queuedRefreshCount));
-                    runtimeState.SetQueuedRefreshCount(remaining);
-
-                    await RunRefreshAsync(request.Reason, stoppingToken);
-                    continue;
-                }
-
-                manualRefreshCts.Cancel();
-                try
-                {
-                    await manualRefreshTask;
-                }
-                catch (OperationCanceledException)
-                {
-                }
-
-                await RunRefreshAsync("scheduled", stoppingToken);
+                var request = await _refreshQueue.Reader.ReadAsync(stoppingToken);
+                var remaining = Math.Max(0, Interlocked.Decrement(ref _queuedRefreshCount));
+                runtimeState.SetQueuedRefreshCount(remaining);
+                await RunRefreshAsync(request.Reason, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -257,6 +229,18 @@ public sealed class ModServiceWorker(
         {
             logger.LogWarning(exception, "Executor path is not available after refresh.");
             return null;
+        }
+    }
+
+    private async Task TriggerManualSelfUpdateCheckAsync(string reason)
+    {
+        try
+        {
+            await selfUpdateService.CheckForUpdatesAsync("manual", CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Manual self-update check failed for refresh reason {Reason}.", reason);
         }
     }
 

@@ -13,14 +13,19 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly StartupTaskService _startupTaskService;
     private readonly TrayPreferencesStore _preferencesStore;
     private readonly NotificationRequestQueue _notificationQueue;
+    private readonly SelfUpdateService _selfUpdateService;
     private readonly ApplicationPaths _paths;
     private readonly StatusForm _statusForm;
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _forceRefreshItem;
+    private readonly ToolStripMenuItem _checkForUpdatesItem;
+    private readonly ToolStripMenuItem _installUpdateItem;
     private readonly ToolStripMenuItem _startupItem;
     private readonly ToolStripMenuItem _notificationsItem;
     private readonly System.Windows.Forms.Timer _uiTimer;
+    private DateTimeOffset? _scheduledUpdateRestartAtUtc;
     private bool _updatingMenuState;
+    private bool _updateActionInProgress;
 
     public TrayApplicationContext(
         IServiceProvider serviceProvider,
@@ -29,6 +34,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         StartupTaskService startupTaskService,
         TrayPreferencesStore preferencesStore,
         NotificationRequestQueue notificationQueue,
+        SelfUpdateService selfUpdateService,
         ApplicationPaths paths)
     {
         _serviceProvider = serviceProvider;
@@ -37,6 +43,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _startupTaskService = startupTaskService;
         _preferencesStore = preferencesStore;
         _notificationQueue = notificationQueue;
+        _selfUpdateService = selfUpdateService;
         _paths = paths;
         _statusForm = ActivatorUtilities.CreateInstance<StatusForm>(_serviceProvider);
 
@@ -47,6 +54,17 @@ public sealed class TrayApplicationContext : ApplicationContext
         _forceRefreshItem = new ToolStripMenuItem("Force Refresh");
         _forceRefreshItem.Click += (_, _) => _refreshController.QueueRefresh("tray-menu");
         menu.Items.Add(_forceRefreshItem);
+
+        _checkForUpdatesItem = new ToolStripMenuItem("Check for Updates");
+        _checkForUpdatesItem.Click += async (_, _) => await TriggerManualUpdateCheckAsync();
+        menu.Items.Add(_checkForUpdatesItem);
+
+        _installUpdateItem = new ToolStripMenuItem("Restart To Update")
+        {
+            Enabled = false
+        };
+        _installUpdateItem.Click += async (_, _) => await ApplyPreparedUpdateAsync();
+        menu.Items.Add(_installUpdateItem);
 
         _startupItem = new ToolStripMenuItem("Run At Login As Admin")
         {
@@ -104,6 +122,15 @@ public sealed class TrayApplicationContext : ApplicationContext
             _forceRefreshItem.Text = runtime.QueuedRefreshCount == 0
                 ? "Force Refresh"
                 : $"Force Refresh ({runtime.QueuedRefreshCount} queued)";
+            _checkForUpdatesItem.Text = BuildCheckForUpdatesText(runtime.SelfUpdate);
+            _checkForUpdatesItem.Enabled = !_updateActionInProgress &&
+                runtime.SelfUpdate.State is not "checking" and not "downloading" and not "applying";
+
+            _installUpdateItem.Text = string.IsNullOrWhiteSpace(runtime.SelfUpdate.PreparedVersion)
+                ? "Restart To Update"
+                : $"Restart To Update ({runtime.SelfUpdate.PreparedVersion})";
+            _installUpdateItem.Enabled = !_updateActionInProgress &&
+                !string.IsNullOrWhiteSpace(runtime.SelfUpdate.PreparedVersion);
 
             _startupItem.Checked = SafeIsStartupEnabled();
             _notificationsItem.Checked = _preferencesStore.AreProcessNotificationsEnabled();
@@ -118,6 +145,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             _notifyIcon.ShowBalloonTip(request.TimeoutMs, request.Title, request.Text, request.Icon);
         }
+
+        MaybeSchedulePreparedUpdate(runtime);
     }
 
     private void ToggleStartup()
@@ -175,7 +204,7 @@ public sealed class TrayApplicationContext : ApplicationContext
                 FileName = "notepad.exe",
                 Arguments = $"\"{_paths.ConfigPath}\"",
                 UseShellExecute = true,
-                WorkingDirectory = _paths.BaseDirectory
+                WorkingDirectory = Path.GetDirectoryName(_paths.ConfigPath) ?? _paths.BaseDirectory
             });
         }
         catch (Exception exception)
@@ -191,6 +220,64 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void ExitApplication()
         => ExitThread();
 
+    private async Task TriggerManualUpdateCheckAsync()
+    {
+        if (_updateActionInProgress)
+        {
+            return;
+        }
+
+        try
+        {
+            await _selfUpdateService.CheckForUpdatesAsync("manual", CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                exception.Message,
+                "ModService",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+
+        UpdateUiState();
+    }
+
+    private async Task ApplyPreparedUpdateAsync()
+    {
+        if (_updateActionInProgress)
+        {
+            return;
+        }
+
+        _updateActionInProgress = true;
+        _scheduledUpdateRestartAtUtc = null;
+        UpdateUiState();
+
+        try
+        {
+            var launched = await _selfUpdateService.ApplyPreparedUpdateAndRestartAsync(CancellationToken.None);
+            if (launched)
+            {
+                ExitApplication();
+                return;
+            }
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                exception.Message,
+                "ModService",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _updateActionInProgress = false;
+            UpdateUiState();
+        }
+    }
+
     private bool SafeIsStartupEnabled()
     {
         try
@@ -203,9 +290,46 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private void MaybeSchedulePreparedUpdate(RuntimeSnapshot snapshot)
+    {
+        if (_updateActionInProgress)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(snapshot.SelfUpdate.PreparedVersion))
+        {
+            _scheduledUpdateRestartAtUtc = null;
+            return;
+        }
+
+        _scheduledUpdateRestartAtUtc ??= DateTimeOffset.UtcNow.AddSeconds(_selfUpdateService.RestartDelaySeconds);
+        if (DateTimeOffset.UtcNow < _scheduledUpdateRestartAtUtc.Value)
+        {
+            return;
+        }
+
+        _ = ApplyPreparedUpdateAsync();
+    }
+
+    private static string BuildCheckForUpdatesText(SelfUpdateStatusSnapshot snapshot)
+    {
+        return snapshot.State switch
+        {
+            "checking" => "Checking for Updates...",
+            "downloading" when snapshot.DownloadProgressPercent is { } progress => $"Downloading Update ({progress}%)",
+            "applying" => "Applying Update...",
+            _ => "Check for Updates"
+        };
+    }
+
     private static string BuildNotifyText(RuntimeSnapshot snapshot)
     {
-        var text = snapshot.RefreshInProgress
+        var text = !string.IsNullOrWhiteSpace(snapshot.SelfUpdate.PreparedVersion)
+            ? "ModService: Update Ready"
+            : snapshot.SelfUpdate.State == "downloading" && snapshot.SelfUpdate.DownloadProgressPercent is { } progress
+                ? $"ModService: Updating ({progress}%)"
+            : snapshot.RefreshInProgress
             ? $"ModService: Refreshing ({snapshot.LastRefreshReason})"
             : snapshot.QueuedRefreshCount > 0
                 ? $"ModService: {snapshot.QueuedRefreshCount} queued"

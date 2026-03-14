@@ -77,4 +77,42 @@ public sealed class ConfigurationValidatorTests
         Assert.Contains(errors, error => error.Contains("http scheme", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(errors, error => error.Contains("must not include a path", StringComparison.OrdinalIgnoreCase));
     }
+
+    [Fact]
+    public void Validate_RejectsInvalidSelfUpdateConfiguration()
+    {
+        var configuration = new ModServiceConfiguration
+        {
+            Http = new HttpApiConfiguration
+            {
+                ListenUrl = "http://127.0.0.1:5047"
+            },
+            SelfUpdate = new SelfUpdateConfiguration
+            {
+                Enabled = true,
+                RepoUrl = "https://github.com/owner/repo",
+                FeedPath = @"C:\updates",
+                RestartDelaySeconds = -1
+            },
+            Executor = new ExecutorConfiguration
+            {
+                Source = "mods",
+                Asset = "injector.dll"
+            },
+            Sources =
+            [
+                new SourceConfiguration
+                {
+                    Id = "mods",
+                    Repo = "owner/repo",
+                    Tag = "stable"
+                }
+            ]
+        };
+
+        var errors = ConfigurationValidator.Validate(configuration);
+
+        Assert.Contains(errors, error => error.Contains("exactly one of repoUrl or feedPath", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(errors, error => error.Contains("restartDelaySeconds", StringComparison.OrdinalIgnoreCase));
+    }
 }

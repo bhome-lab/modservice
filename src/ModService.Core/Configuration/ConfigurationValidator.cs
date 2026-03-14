@@ -11,17 +11,8 @@ public static class ConfigurationValidator
         var errors = new List<string>();
         var sources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        if (configuration.Polling.IntervalSeconds <= 0)
-        {
-            errors.Add("Polling intervalSeconds must be greater than zero.");
-        }
-
-        if (configuration.Polling.JitterSeconds < 0)
-        {
-            errors.Add("Polling jitterSeconds cannot be negative.");
-        }
-
         ValidateHttpApi(configuration.Http, errors);
+        ValidateSelfUpdate(configuration.SelfUpdate, errors);
 
         if (configuration.ProcessMonitoring.Enabled && configuration.ProcessMonitoring.ScanIntervalSeconds <= 0)
         {
@@ -191,6 +182,32 @@ public static class ConfigurationValidator
             {
                 errors.Add($"{owner} contains an empty pattern at index {index}.");
             }
+        }
+    }
+
+    private static void ValidateSelfUpdate(SelfUpdateConfiguration configuration, List<string> errors)
+    {
+        if (!configuration.Enabled)
+        {
+            return;
+        }
+
+        var hasRepoUrl = !string.IsNullOrWhiteSpace(configuration.RepoUrl);
+        var hasFeedPath = !string.IsNullOrWhiteSpace(configuration.FeedPath);
+
+        if (hasRepoUrl == hasFeedPath)
+        {
+            errors.Add("SelfUpdate must specify exactly one of repoUrl or feedPath when enabled.");
+        }
+
+        if (hasRepoUrl && !Uri.TryCreate(configuration.RepoUrl, UriKind.Absolute, out _))
+        {
+            errors.Add($"SelfUpdate repoUrl '{configuration.RepoUrl}' is not a valid absolute URI.");
+        }
+
+        if (configuration.RestartDelaySeconds < 0)
+        {
+            errors.Add("SelfUpdate restartDelaySeconds cannot be negative.");
         }
     }
 
