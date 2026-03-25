@@ -2,6 +2,9 @@
 
 #include <string>
 
+// Import from DepModule (tests cross-module dependency resolution).
+extern "C" __declspec(dllimport) int DepModuleGetValue();
+
 namespace {
 
 void append_line(const wchar_t* line) {
@@ -30,11 +33,16 @@ extern "C" __declspec(dllexport) int SampleModuleTouch() {
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
+        // Verify DepModule is accessible (proves dependency was manually mapped).
+        const int dep_val = DepModuleGetValue();
+
         wchar_t marker[256] = {};
         if (GetEnvironmentVariableW(L"MODSERVICE_SAMPLE_MARKER", marker, 256) > 0) {
-            append_line(marker);
+            // Append marker + dep value to output.
+            std::wstring line = std::wstring(marker) + L":" + std::to_wstring(dep_val);
+            append_line(line.c_str());
         } else {
-            append_line(L"missing-marker-v4");
+            append_line(L"missing-marker-v5");
         }
     }
 

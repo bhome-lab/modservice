@@ -32,7 +32,9 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.props" />
+  </ImportGroup>
   <ImportGroup Label="Shared" />
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
@@ -78,10 +80,30 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="mm_executor.h" />
+    <ClInclude Include="syscalls.h" />
+    <ClInclude Include="peb_walk.h" />
+    <ClInclude Include="manual_map.h" />
+    <ClInclude Include="loader_stub.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="executor.cpp" />
+    <ClCompile Include="syscalls.cpp" />
+    <ClCompile Include="peb_walk.cpp" />
+    <ClCompile Include="manual_map.cpp" />
+    <ClCompile Include="loader_stub.cpp">
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <SDLCheck>false</SDLCheck>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">MaxSpeed</Optimization>
+      <JustMyCodeDebugging>false</JustMyCodeDebugging>
+      <AdditionalOptions>/utf-8 /GS- /JMC- %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="syscall_stub.asm" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <ImportGroup Label="ExtensionTargets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
+  </ImportGroup>
 </Project>

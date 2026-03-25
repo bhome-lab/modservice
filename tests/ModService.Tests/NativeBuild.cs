@@ -45,7 +45,7 @@ internal static class NativeBuild
 
     private static bool ShouldBuildNative()
     {
-        if (!File.Exists(RepoPaths.NativeExecutorDll) || !File.Exists(RepoPaths.SampleModuleDll))
+        if (!File.Exists(RepoPaths.NativeExecutorDll) || !File.Exists(RepoPaths.SampleModuleDll) || !File.Exists(RepoPaths.DepModuleDll))
         {
             return true;
         }
@@ -53,7 +53,8 @@ internal static class NativeBuild
         var outputTimestamp = new[]
         {
             File.GetLastWriteTimeUtc(RepoPaths.NativeExecutorDll),
-            File.GetLastWriteTimeUtc(RepoPaths.SampleModuleDll)
+            File.GetLastWriteTimeUtc(RepoPaths.SampleModuleDll),
+            File.GetLastWriteTimeUtc(RepoPaths.DepModuleDll)
         }.Min();
 
         var nativeRoot = Path.Combine(RepoPaths.Root, "native");

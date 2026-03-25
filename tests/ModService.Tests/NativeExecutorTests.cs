@@ -26,7 +26,7 @@ public sealed class NativeExecutorTests
                 ProcessId = (uint)process.Id,
                 ProcessCreateTimeUtc100ns = (ulong)process.StartTime.ToUniversalTime().ToFileTimeUtc(),
                 ExecutablePath = process.MainModule?.FileName ?? Environment.ProcessPath ?? "testhost",
-                ModulePaths = [RepoPaths.SampleModuleDll],
+                ModulePaths = [RepoPaths.DepModuleDll, RepoPaths.SampleModuleDll],
                 EnvironmentVariables =
                 [
                     new NativeEnvironmentVariable { Name = "MODSERVICE_SAMPLE_OUTPUT", Value = tempFile },
@@ -36,11 +36,12 @@ public sealed class NativeExecutorTests
                 [
                     new NativeExecutorOption { Name = "mode", Value = "safe-smoke" }
                 ],
-                TimeoutMs = 1000
+                TimeoutMs = 5000
             });
 
             Assert.True(result.IsSuccess, result.ErrorText);
-            Assert.Equal("hello-from-test", Encoding.Unicode.GetString(File.ReadAllBytes(tempFile)).Trim('\0', '\r', '\n'));
+            // SampleModule now appends ":42" from DepModule dependency.
+            Assert.Equal("hello-from-test:42", Encoding.Unicode.GetString(File.ReadAllBytes(tempFile)).Trim('\0', '\r', '\n'));
         }
         finally
         {

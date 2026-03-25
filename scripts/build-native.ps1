@@ -28,7 +28,9 @@ function Resolve-MSBuildPath {
 $msbuild = Resolve-MSBuildPath
 $projects = @(
     'native/NativeExecutor/NativeExecutor.vcxproj',
+    'native/DepModule/DepModule.vcxproj',
     'native/SampleModule/SampleModule.vcxproj',
+    'native/CppFeatureTest/CppFeatureTest.vcxproj',
     'native/TestApp/TestApp.vcxproj'
 )
 
