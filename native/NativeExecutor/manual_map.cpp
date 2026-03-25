@@ -592,20 +592,17 @@ void gather_tls_info(const std::vector<uint8_t>& image, const PeFile& pe,
     const auto* tls_dir = reinterpret_cast<const IMAGE_TLS_DIRECTORY64*>(
         image.data() + dir.VirtualAddress);
 
-    // The AddressOfIndex is an absolute VA in the preferred image; adjust for actual base.
-    const auto delta = static_cast<int64_t>(remote_base) -
-                       static_cast<int64_t>(pe.nt->OptionalHeader.ImageBase);
-    tls.address_of_index = tls_dir->AddressOfIndex + delta;
+    // Relocations have already been applied to the local image, so all VAs in
+    // the TLS directory are already adjusted for remote_base.  Do NOT add delta.
+    tls.address_of_index = tls_dir->AddressOfIndex;
 
     // Walk the callback array (null-terminated array of VAs).
     if (tls_dir->AddressOfCallBacks) {
-        // The callback array is in the mapped image.  Compute its offset.
-        const auto cb_array_va = tls_dir->AddressOfCallBacks + delta;
-        const auto cb_array_offset = cb_array_va - remote_base;
+        const auto cb_array_offset = tls_dir->AddressOfCallBacks - remote_base;
         if (cb_array_offset < image.size()) {
             const auto* cbs = reinterpret_cast<const uint64_t*>(image.data() + cb_array_offset);
             while (*cbs) {
-                tls.callbacks.push_back(*cbs + delta);
+                tls.callbacks.push_back(*cbs);  // already relocated
                 ++cbs;
             }
         }
@@ -909,16 +906,18 @@ mm_status manual_map_remote(
         ctx->fn_rtl_add_function_table = fn_rtl_add;
         ctx->pdata_base              = pdata.rva ? rb + pdata.rva : 0;
         ctx->pdata_entry_count       = pdata.count;
-        ctx->fn_tls_alloc            = fn_tls_alloc;
-        ctx->tls_index_addr          = tls.address_of_index;
-        ctx->tls_callback_count      = static_cast<uint32_t>(tls.callbacks.size());
+        // TLS is handled by _DllMainCRTStartup internally.  Manual TlsAlloc +
+        // callback invocation is NOT needed and causes double-init crashes.
+        // Leave these zeroed so the stub skips TLS operations.
+        ctx->fn_tls_alloc            = 0;
+        ctx->tls_index_addr          = 0;
+        ctx->tls_callback_count      = 0;
 
         auto* cb_arr = reinterpret_cast<uint64_t*>(ctx + 1);
         for (size_t i = 0; i < tls.callbacks.size(); ++i) {
             cb_arr[i] = tls.callbacks[i];
         }
 
-        // Get the dllmain_stub code.
         const auto stub = get_stub_info(reinterpret_cast<void*>(&dllmain_stub));
         if (!stub.code || stub.size == 0) {
             error = L"Failed to locate dllmain_stub code.";
@@ -942,12 +941,39 @@ mm_status manual_map_remote(
     }
 
     // ── 12. Erase PE headers from remote memory (stealth) ─────────────────────
-    // Zero the DOS/NT/section headers.  The inverted function table and
-    // RtlAddFunctionTable have already cached the .pdata information.
+    // The CRT's _ValidateImageBase checks for DOS/NT signatures at the module
+    // base during security cookie operations and _IsNonwritableInCurrentImage.
+    // We preserve just the minimum fields and zero everything else.
     {
         const auto hdr_size = pe.nt->OptionalHeader.SizeOfHeaders;
-        std::vector<uint8_t> zeros(hdr_size, 0);
-        syscall::NtWriteVirtualMemory(process, remote_base, zeros.data(), hdr_size, nullptr);
+        const auto e_lfanew = pe.dos->e_lfanew;
+
+        std::vector<uint8_t> scrubbed(hdr_size, 0);
+
+        // IMAGE_DOS_HEADER.e_magic ('MZ') at offset 0
+        scrubbed[0] = 'M'; scrubbed[1] = 'Z';
+        // IMAGE_DOS_HEADER.e_lfanew at offset 0x3C
+        memcpy(scrubbed.data() + 0x3C, &e_lfanew, sizeof(e_lfanew));
+        // IMAGE_NT_HEADERS64.Signature ('PE') at e_lfanew
+        scrubbed[e_lfanew] = 'P'; scrubbed[e_lfanew + 1] = 'E';
+        // IMAGE_FILE_HEADER.NumberOfSections at e_lfanew + 6
+        memcpy(scrubbed.data() + e_lfanew + 6,
+               &pe.nt->FileHeader.NumberOfSections, sizeof(WORD));
+        // IMAGE_OPTIONAL_HEADER64.Magic at e_lfanew + 0x18
+        scrubbed[e_lfanew + 0x18] = 0x0B; scrubbed[e_lfanew + 0x19] = 0x02;
+        // IMAGE_OPTIONAL_HEADER64.SizeOfImage at e_lfanew + 0x38
+        memcpy(scrubbed.data() + e_lfanew + 0x38,
+               &pe.nt->OptionalHeader.SizeOfImage, sizeof(DWORD));
+        // Preserve section headers (needed for _IsNonwritableInCurrentImage to
+        // determine which sections are read-only).
+        const auto sec_offset = reinterpret_cast<const uint8_t*>(pe.sections) - pe.raw.data();
+        const auto sec_size = pe.nt->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER);
+        if (sec_offset + sec_size <= hdr_size) {
+            memcpy(scrubbed.data() + sec_offset,
+                   pe.raw.data() + sec_offset, sec_size);
+        }
+
+        syscall::NtWriteVirtualMemory(process, remote_base, scrubbed.data(), hdr_size, nullptr);
     }
 
     // Success — module stays mapped.  Wipe PE data from local memory.
