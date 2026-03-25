@@ -284,7 +284,8 @@ mm_status resolve_imports(
     uint32_t timeout_ms,
     const std::vector<RemoteModuleInfo>& remote_modules,
     std::vector<MappedModule>& mapped_modules,
-    std::wstring& error)
+    std::wstring& error,
+    uint32_t depth)
 {
     const auto& import_dir = pe.nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (import_dir.VirtualAddress == 0 || import_dir.Size == 0) return MM_OK;
@@ -326,7 +327,7 @@ mm_status resolve_imports(
             std::wstring dep_path = dll_directory + L"\\" + dll_name_w;
             if (GetFileAttributesW(dep_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
                 auto st = manual_map_remote(process, dep_path, timeout_ms,
-                                             remote_modules, mapped_modules, error);
+                                             remote_modules, mapped_modules, error, depth + 1);
                 if (st != MM_OK) return st;
 
                 mapped_dep = find_mapped_module(mapped_modules, dll_name_w.c_str());
@@ -335,13 +336,18 @@ mm_status resolve_imports(
         }
 
         // 4. Search System32 and recursively manual-map if found on disk.
-        if (!dep_base) {
+        //    Skip api-ms-win-* / ext-ms-* stub DLLs — they are API set forwarders,
+        //    not real DLLs.  If API set resolution (step 2) didn't find the target,
+        //    the DLL simply isn't loaded in the target and must be mapped as a real DLL.
+        if (!dep_base &&
+            _wcsnicmp(dll_name_w.c_str(), L"api-ms-", 7) != 0 &&
+            _wcsnicmp(dll_name_w.c_str(), L"ext-ms-", 7) != 0) {
             wchar_t sys_dir[MAX_PATH]{};
             GetSystemDirectoryW(sys_dir, MAX_PATH);
             std::wstring sys_path = std::wstring(sys_dir) + L"\\" + dll_name_w;
             if (GetFileAttributesW(sys_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
                 auto st = manual_map_remote(process, sys_path, timeout_ms,
-                                             remote_modules, mapped_modules, error);
+                                             remote_modules, mapped_modules, error, depth + 1);
                 if (st != MM_OK) return st;
 
                 mapped_dep = find_mapped_module(mapped_modules, dll_name_w.c_str());
@@ -723,9 +729,15 @@ mm_status manual_map_remote(
     uint32_t timeout_ms,
     const std::vector<RemoteModuleInfo>& remote_modules,
     std::vector<MappedModule>& mapped_modules,
-    std::wstring& error)
+    std::wstring& error,
+    uint32_t depth)
 {
     const auto dll_name = filename_from_path(dll_path);
+
+    if (depth > 16) {
+        error = L"Dependency recursion limit exceeded for: " + dll_name;
+        return MM_EXECUTION_FAILED;
+    }
     const auto dll_dir  = directory_from_path(dll_path);
 
     // ── Check if already mapped ────────────────────────────────────────────────
@@ -805,7 +817,7 @@ mm_status manual_map_remote(
     // ── 6. Resolve imports ─────────────────────────────────────────────────────
     {
         auto rstatus = resolve_imports(process, local_image, pe, dll_dir, timeout_ms,
-                                        remote_modules, mapped_modules, error);
+                                        remote_modules, mapped_modules, error, depth);
         if (rstatus != MM_OK) {
             remove_self();
             SIZE_T free_sz = 0;

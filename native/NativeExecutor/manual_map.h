@@ -33,7 +33,8 @@ mm_status manual_map_remote(
     uint32_t timeout_ms,
     const std::vector<RemoteModuleInfo>& remote_modules,
     std::vector<MappedModule>& mapped_modules,
-    std::wstring& error);
+    std::wstring& error,
+    uint32_t depth = 0);
 
 // Execute a position-independent stub in the target process.
 // Allocates code + data pages, runs a thread, waits, then zeros + frees everything.
