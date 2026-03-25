@@ -524,19 +524,21 @@ mm_status execute_remote_stub(HANDLE process, const void* code, size_t code_size
         // 7. Wait.
         LARGE_INTEGER timeout{};
         timeout.QuadPart = timeout_ms == 0
-            ? static_cast<LONGLONG>(-1)  // ~infinite (max negative = very long)
-            : -static_cast<LONGLONG>(timeout_ms) * 10000LL;  // ms → 100ns units, relative
+            ? static_cast<LONGLONG>(-1)
+            : -static_cast<LONGLONG>(timeout_ms) * 10000LL;
         st = syscall::NtWaitForSingleObject(thread, FALSE, timeout_ms == 0 ? nullptr : &timeout);
 
-        DWORD exit_code = 0xFFFFFFFF;
-        GetExitCodeThread(thread, &exit_code);
-        syscall::NtClose(thread);
-
         if (!NT_SUCCESS(st)) {
+            // Timeout or wait error — thread may still be running.
+            syscall::NtClose(thread);
             error = L"Remote thread timed out or wait failed.";
             result = MM_TIMEOUT;
             goto cleanup;
         }
+
+        DWORD exit_code = 0;
+        GetExitCodeThread(thread, &exit_code);
+        syscall::NtClose(thread);
 
         if (exit_code != 0) {
             error = L"Remote stub returned error code: " + std::to_wstring(exit_code);

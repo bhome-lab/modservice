@@ -351,7 +351,7 @@ public sealed class ProcessWatchWorker(
                 ExecutorOptions = plan.ExecutorOptions
                     .Select(item => new NativeExecutorOption { Name = item.Name, Value = item.Value })
                     .ToArray(),
-                TimeoutMs = 1_000
+                TimeoutMs = 30_000
             });
 
             if (!result.IsSuccess)
