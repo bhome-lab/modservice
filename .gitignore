@@ -10,3 +10,9 @@ native/**/obj/
 *.ipch
 *.VC.db
 *.VC.opendb
+
+# POE game files (from working directory tests)
+Content.ggpk
+HashCache.dat
+PathOfExile.tmp
+logs/
