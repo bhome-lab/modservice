@@ -40,10 +40,15 @@ extern "C" DWORD WINAPI env_apply_stub(void* parameter) {
 
 // ── dllmain_stub ───────────────────────────────────────────────────────────────
 // Thread entry point.  Parameter is DllMainContext* in target memory.
-// 1. Register exception handlers (.pdata) via RtlAddFunctionTable
-// 2. Allocate TLS index and store it
-// 3. Call TLS callbacks
-// 4. Call DllMain(DLL_PROCESS_ATTACH)
+//
+// 1. Register .pdata via RtlAddFunctionTable (SEH support).
+// 2. Call _DllMainCRTStartup (the PE entry point), which internally handles:
+//    - Security cookie initialization
+//    - CRT heap/stdio/locale init
+//    - TLS setup (TlsAlloc, TLS callbacks)
+//    - C/C++ static constructors (_initterm)
+//    - User DllMain(DLL_PROCESS_ATTACH)
+//
 // Returns 0 on success.
 
 __declspec(noinline) __declspec(safebuffers)
@@ -63,23 +68,8 @@ extern "C" DWORD WINAPI dllmain_stub(void* parameter) {
                ctx->image_base);
     }
 
-    // 2. Allocate TLS index.
-    if (ctx->fn_tls_alloc && ctx->tls_index_addr) {
-        using TlsAllocFn = DWORD(WINAPI*)();
-        auto tls_alloc = reinterpret_cast<TlsAllocFn>(static_cast<uintptr_t>(ctx->fn_tls_alloc));
-        DWORD idx = tls_alloc();
-        *reinterpret_cast<DWORD*>(static_cast<uintptr_t>(ctx->tls_index_addr)) = idx;
-    }
-
-    // 3. Call TLS callbacks.
-    auto* tls_ptrs = reinterpret_cast<uint64_t*>(ctx + 1);
-    for (uint32_t i = 0; i < ctx->tls_callback_count; ++i) {
-        using TlsCallback = void(WINAPI*)(PVOID, DWORD, PVOID);
-        auto cb = reinterpret_cast<TlsCallback>(static_cast<uintptr_t>(tls_ptrs[i]));
-        cb(base, DLL_PROCESS_ATTACH, nullptr);
-    }
-
-    // 4. Call DllMain.
+    // 2. Call _DllMainCRTStartup.  The CRT handles all initialization including
+    //    TLS, security cookies, static constructors, and the user's DllMain.
     if (ctx->entry_point) {
         using DllMainFn = BOOL(WINAPI*)(HMODULE, DWORD, LPVOID);
         auto entry = reinterpret_cast<DllMainFn>(static_cast<uintptr_t>(ctx->entry_point));
@@ -93,18 +83,16 @@ extern "C" DWORD WINAPI dllmain_stub(void* parameter) {
 #pragma runtime_checks("", restore)
 
 // ── get_stub_info ──────────────────────────────────────────────────────────────
-// Locate a function's boundaries via RtlLookupFunctionEntry.
+// Locate a function's boundaries via its RUNTIME_FUNCTION entries in .pdata.
 // In Debug/incremental-link builds, &func points to a JMP thunk — we follow it.
 
 static void* resolve_jmp_thunk(void* addr) {
     auto* p = static_cast<uint8_t*>(addr);
-    // E9 xx xx xx xx  =  relative JMP (incremental-link thunk)
     if (p[0] == 0xE9) {
         int32_t offset;
         memcpy(&offset, p + 1, 4);
         return p + 5 + offset;
     }
-    // FF 25 xx xx xx xx  =  indirect JMP [rip+disp32]
     if (p[0] == 0xFF && p[1] == 0x25) {
         int32_t offset;
         memcpy(&offset, p + 2, 4);
@@ -115,10 +103,8 @@ static void* resolve_jmp_thunk(void* addr) {
 }
 
 StubInfo get_stub_info(void* func_addr) {
-    // Follow potential incremental-link JMP thunk.
     void* resolved = resolve_jmp_thunk(func_addr);
 
-    // Find our module base and .pdata section.
     HMODULE self = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -138,25 +124,13 @@ StubInfo get_stub_info(void* func_addr) {
         reinterpret_cast<const uint8_t*>(self) + pdata_dir.VirtualAddress);
     const auto count = pdata_dir.Size / static_cast<DWORD>(sizeof(RUNTIME_FUNCTION));
 
-    // Find the maximum EndAddress for all .pdata entries that belong to this function,
-    // and the smallest BeginAddress of the NEXT function to use as an upper bound.
     uint32_t func_end = func_rva;
-    uint32_t next_func = UINT32_MAX;
-
     for (DWORD i = 0; i < count; ++i) {
-        // Entries whose BeginAddress matches ours (primary or chained entries).
         if (entries[i].BeginAddress >= func_rva && entries[i].EndAddress > func_end) {
-            // This entry's range extends our function.
             func_end = entries[i].EndAddress;
-        }
-        // Track the next function's start (smallest BeginAddress > our end).
-        if (entries[i].BeginAddress > func_rva && entries[i].BeginAddress < next_func) {
-            next_func = entries[i].BeginAddress;
         }
     }
 
-    // Use the max of (our entries' EndAddress) and (up to next function start).
-    // For split functions, we need the distance to the next different function.
     uint32_t size = func_end - func_rva;
     if (size == 0) return {nullptr, 0};
 

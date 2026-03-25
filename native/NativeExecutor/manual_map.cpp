@@ -575,39 +575,7 @@ cleanup:
     return result;
 }
 
-// ── TLS handling ───────────────────────────────────────────────────────────────
-
 namespace {
-
-struct TlsInfo {
-    uint64_t address_of_index = 0;  // VA to the TLS index slot (in mapped image)
-    std::vector<uint64_t> callbacks; // VA list of TLS callbacks (in mapped image)
-};
-
-void gather_tls_info(const std::vector<uint8_t>& image, const PeFile& pe,
-                      uintptr_t remote_base, TlsInfo& tls) {
-    const auto& dir = pe.nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
-    if (dir.VirtualAddress == 0 || dir.Size == 0) return;
-
-    const auto* tls_dir = reinterpret_cast<const IMAGE_TLS_DIRECTORY64*>(
-        image.data() + dir.VirtualAddress);
-
-    // Relocations have already been applied to the local image, so all VAs in
-    // the TLS directory are already adjusted for remote_base.  Do NOT add delta.
-    tls.address_of_index = tls_dir->AddressOfIndex;
-
-    // Walk the callback array (null-terminated array of VAs).
-    if (tls_dir->AddressOfCallBacks) {
-        const auto cb_array_offset = tls_dir->AddressOfCallBacks - remote_base;
-        if (cb_array_offset < image.size()) {
-            const auto* cbs = reinterpret_cast<const uint64_t*>(image.data() + cb_array_offset);
-            while (*cbs) {
-                tls.callbacks.push_back(*cbs);  // already relocated
-                ++cbs;
-            }
-        }
-    }
-}
 
 // ── .pdata info ────────────────────────────────────────────────────────────────
 
@@ -823,11 +791,7 @@ mm_status manual_map_remote(
         }
     }
 
-    // ── 7. Gather TLS info (before writing image) ──────────────────────────────
-    TlsInfo tls{};
-    gather_tls_info(local_image, pe, rb, tls);
-
-    // ── 8. Write image to target ───────────────────────────────────────────────
+    // ── 7. Write image to target ──────────────────────────────────────────────
     st = syscall::NtWriteVirtualMemory(process, remote_base,
                                         local_image.data(), local_image.size(), nullptr);
     // Wipe local copy.
@@ -869,36 +833,28 @@ mm_status manual_map_remote(
         }
     }
 
-    // ── 11. Execute DllMain via loader stub ────────────────────────────────────
+    // ── 11. Execute _DllMainCRTStartup via loader stub ─────────────────────────
+    //    The CRT entry point handles ALL initialization: security cookie, CRT
+    //    init, TLS setup, static constructors, and the user's DllMain.
     {
-        // Build context.
         const auto pdata = get_pdata_info(pe);
         const auto ep = pe.nt->OptionalHeader.AddressOfEntryPoint;
 
-        // Resolve runtime helpers from remote ntdll/kernel32 (best-effort).
+        // Resolve RtlAddFunctionTable from remote ntdll/kernel32 (best-effort).
         uintptr_t fn_rtl_add = 0;
-        uintptr_t fn_tls_alloc = 0;
         {
             std::wstring ignore_err;
             for (const auto& mod : remote_modules) {
-                if (_wcsicmp(mod.name.c_str(), L"ntdll.dll") == 0 && fn_rtl_add == 0) {
+                if (fn_rtl_add != 0) break;
+                if (_wcsicmp(mod.name.c_str(), L"ntdll.dll") == 0 ||
+                    _wcsicmp(mod.name.c_str(), L"kernel32.dll") == 0) {
                     resolve_remote_export(process, mod.base, "RtlAddFunctionTable",
                                            fn_rtl_add, remote_modules, ignore_err);
-                }
-                if (_wcsicmp(mod.name.c_str(), L"kernel32.dll") == 0) {
-                    if (fn_rtl_add == 0)
-                        resolve_remote_export(process, mod.base, "RtlAddFunctionTable",
-                                               fn_rtl_add, remote_modules, ignore_err);
-                    if (fn_tls_alloc == 0)
-                        resolve_remote_export(process, mod.base, "TlsAlloc",
-                                               fn_tls_alloc, remote_modules, ignore_err);
                 }
             }
         }
 
-        const size_t ctx_size = sizeof(DllMainContext) +
-                                tls.callbacks.size() * sizeof(uint64_t);
-        std::vector<uint8_t> ctx_buf(ctx_size, 0);
+        std::vector<uint8_t> ctx_buf(sizeof(DllMainContext), 0);
         auto* ctx = reinterpret_cast<DllMainContext*>(ctx_buf.data());
 
         ctx->image_base              = rb;
@@ -906,17 +862,6 @@ mm_status manual_map_remote(
         ctx->fn_rtl_add_function_table = fn_rtl_add;
         ctx->pdata_base              = pdata.rva ? rb + pdata.rva : 0;
         ctx->pdata_entry_count       = pdata.count;
-        // TLS is handled by _DllMainCRTStartup internally.  Manual TlsAlloc +
-        // callback invocation is NOT needed and causes double-init crashes.
-        // Leave these zeroed so the stub skips TLS operations.
-        ctx->fn_tls_alloc            = 0;
-        ctx->tls_index_addr          = 0;
-        ctx->tls_callback_count      = 0;
-
-        auto* cb_arr = reinterpret_cast<uint64_t*>(ctx + 1);
-        for (size_t i = 0; i < tls.callbacks.size(); ++i) {
-            cb_arr[i] = tls.callbacks[i];
-        }
 
         const auto stub = get_stub_info(reinterpret_cast<void*>(&dllmain_stub));
         if (!stub.code || stub.size == 0) {

@@ -20,16 +20,11 @@ struct EnvApplyContext {
 
 struct DllMainContext {
     uint64_t image_base;
-    uint64_t entry_point;               // DllMain address (0 → skip call)
+    uint64_t entry_point;               // _DllMainCRTStartup address (0 → skip)
     uint64_t fn_rtl_add_function_table;  // RtlAddFunctionTable (0 → skip)
     uint64_t pdata_base;                // image_base + .pdata VirtualAddress
     uint32_t pdata_entry_count;         // number of RUNTIME_FUNCTION entries
     uint32_t _pad0;
-    uint64_t fn_tls_alloc;              // TlsAlloc address (0 → skip)
-    uint64_t tls_index_addr;            // &AddressOfIndex in mapped image (0 → skip)
-    uint32_t tls_callback_count;
-    uint32_t _pad1;
-    // Followed by tls_callback_count × uint64_t callback addresses
 };
 
 // ── Loader stub function pointers ──────────────────────────────────────────────
