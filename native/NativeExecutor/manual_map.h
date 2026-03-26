@@ -29,6 +29,7 @@ struct MappedModule {
 
 mm_status manual_map_remote(
     HANDLE process,
+    uint32_t target_pid,
     const std::wstring& dll_path,
     uint32_t timeout_ms,
     const std::vector<RemoteModuleInfo>& remote_modules,

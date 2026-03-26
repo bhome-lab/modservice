@@ -11,80 +11,101 @@
 //
 // The compiled machine code is read from our own image at runtime and copied
 // verbatim to the target process, so it must work at any base address.
+//
+// Each stub checks hdr.hijack_mode: if set, signals completion and exits
+// the thread cleanly via RtlExitUserThread.
 
 #include "loader_stub.h"
 
 #pragma runtime_checks("", off)
 
-// ── env_apply_stub ─────────────────────────────────────────────────────────────
-// Thread entry point.  Parameter is EnvApplyContext* in target memory.
-// Calls SetEnvironmentVariableW for each env var, returns 0 on success.
+// ── env_apply_stub ─────────────────────────────────────────────────────────
 
 __declspec(noinline) __declspec(safebuffers)
 extern "C" DWORD WINAPI env_apply_stub(void* parameter) {
     auto* ctx = static_cast<EnvApplyContext*>(parameter);
     if (!ctx) return 1;
 
+    // Helper type for clean thread exit (no spinloop, no CPU spike).
+    using ExitThreadFn = void(NTAPI*)(DWORD);
+    auto exit_thread = reinterpret_cast<ExitThreadFn>(
+        static_cast<uintptr_t>(ctx->hdr.fn_exit_thread));
+
     using SetEnvFn = BOOL(WINAPI*)(const wchar_t*, const wchar_t*);
     auto set_env = reinterpret_cast<SetEnvFn>(ctx->fn_set_env_variable_w);
-    if (!set_env) return 2;
+    if (!set_env) {
+        DWORD rc = 2;
+        if (ctx->hdr.hijack_mode) {
+            ctx->hdr.result = rc;
+            ctx->hdr.completed = 1;
+            exit_thread(rc);
+        }
+        return rc;
+    }
 
     auto* entries = reinterpret_cast<EnvEntry*>(ctx + 1);
     for (uint32_t i = 0; i < ctx->env_count; ++i) {
         auto* name  = reinterpret_cast<const wchar_t*>(entries[i].name_ptr);
         auto* value = reinterpret_cast<const wchar_t*>(entries[i].value_ptr);
-        if (!set_env(name, value)) return 3;
+        if (!set_env(name, value)) {
+            DWORD rc = 3;
+            if (ctx->hdr.hijack_mode) {
+                ctx->hdr.result = rc;
+                ctx->hdr.completed = 1;
+                exit_thread(rc);
+            }
+            return rc;
+        }
+    }
+
+    if (ctx->hdr.hijack_mode) {
+        ctx->hdr.result = 0;
+        ctx->hdr.completed = 1;
+        exit_thread(0);
     }
     return 0;
 }
 
-// ── dllmain_stub ───────────────────────────────────────────────────────────────
-// Thread entry point.  Parameter is DllMainContext* in target memory.
-//
-// 1. Register .pdata via RtlAddFunctionTable (SEH support).
-// 2. Call _DllMainCRTStartup (the PE entry point), which internally handles:
-//    - Security cookie initialization
-//    - CRT heap/stdio/locale init
-//    - TLS setup (TlsAlloc, TLS callbacks)
-//    - C/C++ static constructors (_initterm)
-//    - User DllMain(DLL_PROCESS_ATTACH)
-//
-// Returns 0 on success.
+// ── dllmain_stub ───────────────────────────────────────────────────────────
 
 __declspec(noinline) __declspec(safebuffers)
 extern "C" DWORD WINAPI dllmain_stub(void* parameter) {
     auto* ctx = static_cast<DllMainContext*>(parameter);
     if (!ctx) return 1;
 
+    using ExitThreadFn = void(NTAPI*)(DWORD);
+    auto exit_thread = reinterpret_cast<ExitThreadFn>(
+        static_cast<uintptr_t>(ctx->hdr.fn_exit_thread));
+
     auto base = reinterpret_cast<void*>(static_cast<uintptr_t>(ctx->image_base));
 
-    // 1. Register .pdata for SEH exception unwinding via RtlAddFunctionTable.
-    //    The host also inserts into KiUserInvertedFunctionTable for RTTI support.
-    if (ctx->fn_rtl_add_function_table && ctx->pdata_base) {
-        using AddFnTable = BOOLEAN(WINAPI*)(PRUNTIME_FUNCTION, DWORD, DWORD64);
-        auto add_fn = reinterpret_cast<AddFnTable>(static_cast<uintptr_t>(ctx->fn_rtl_add_function_table));
-        add_fn(reinterpret_cast<PRUNTIME_FUNCTION>(static_cast<uintptr_t>(ctx->pdata_base)),
-               ctx->pdata_entry_count,
-               ctx->image_base);
-    }
-
-    // 2. Call _DllMainCRTStartup.  The CRT handles all initialization including
-    //    TLS, security cookies, static constructors, and the user's DllMain.
+    // Call _DllMainCRTStartup.
     if (ctx->entry_point) {
         using DllMainFn = BOOL(WINAPI*)(HMODULE, DWORD, LPVOID);
         auto entry = reinterpret_cast<DllMainFn>(static_cast<uintptr_t>(ctx->entry_point));
         BOOL ok = entry(static_cast<HMODULE>(base), DLL_PROCESS_ATTACH, nullptr);
-        if (!ok) return 4;
+        if (!ok) {
+            DWORD rc = 4;
+            if (ctx->hdr.hijack_mode) {
+                ctx->hdr.result = rc;
+                ctx->hdr.completed = 1;
+                exit_thread(rc);
+            }
+            return rc;
+        }
     }
 
+    if (ctx->hdr.hijack_mode) {
+        ctx->hdr.result = 0;
+        ctx->hdr.completed = 1;
+        exit_thread(0);
+    }
     return 0;
 }
 
 #pragma runtime_checks("", restore)
 
-// ── get_stub_info ──────────────────────────────────────────────────────────────
-// Locate a function's boundaries via its RUNTIME_FUNCTION entries in .pdata.
-// In Debug/incremental-link builds, &func points to a JMP thunk — we follow it.
+// ── get_stub_info ──────────────────────────────────────────────────────────
 
 static void* resolve_jmp_thunk(void* addr) {
     auto* p = static_cast<uint8_t*>(addr);

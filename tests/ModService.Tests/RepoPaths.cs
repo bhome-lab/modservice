@@ -10,6 +10,8 @@ internal static class RepoPaths
 
     public static string DepModuleDll => Path.Combine(Root, "artifacts", "native", "DepModule", "x64", "Debug", "DepModule.dll");
 
+    public static string TestAppExe => Path.Combine(Root, "artifacts", "native", "TestApp", "x64", "Debug", "TestApp.exe");
+
     private static string FindRepoRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

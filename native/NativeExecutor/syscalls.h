@@ -109,16 +109,48 @@ enum class SyscallId : uint32_t {
     NtCreateThreadEx,
     NtWaitForSingleObject,
     NtQueryInformationProcess,
+    NtQuerySystemInformation,
+    NtOpenThread,
+    NtSuspendThread,
+    NtResumeThread,
+    NtGetContextThread,
+    NtSetContextThread,
+    NtDelayExecution,
     Count
 };
 
 // Must be called once before any syscall:: function.
 bool syscall_init(std::wstring& error);
 
-// The trampoline and shared state (set per-call by each wrapper).
-extern "C" uint32_t  g_syscall_ssn;
+// Manual export table walk — avoids GetProcAddress monitoring.
+void* syscall_find_local_export(HMODULE mod, const char* name);
+
+// Get the SSN for a given syscall ID (after init).
+uint32_t syscall_get_ssn(SyscallId id);
+
+// The indirect syscall gadget address (set once at init).
 extern "C" void*     g_syscall_gadget;
-extern "C" NTSTATUS  indirect_syscall_stub();
+
+// ── Stack spoofing state (set once at init) ─────────────────────────────────
+
+struct SpoofFrame {
+    uint32_t stack_size;    // total frame size for unwinder
+    void*    ret_addr;      // spoofed return address
+};
+
+struct SpoofConfig {
+    void*      jmp_rbx_gadget;  // address of FF 23 (jmp [rbx]) in kernelbase
+    SpoofFrame gadget_frame;    // frame for the gadget function
+    SpoofFrame frame1;          // BaseThreadInitThunk frame
+    SpoofFrame frame2;          // RtlUserThreadStart frame
+};
+
+extern "C" SpoofConfig g_spoof_config;
+
+// The dispatch function: takes SSN as first arg, rearranges to NT convention,
+// builds a spoofed return address, and executes the syscall.
+// Called as: ssn_dispatch(ssn, arg1, arg2, arg3, arg4, arg5, ...)
+extern "C" NTSTATUS  ssn_dispatch();
 
 // ── Syscall wrappers ───────────────────────────────────────────────────────────
 
@@ -156,6 +188,22 @@ NTSTATUS NtWaitForSingleObject(HANDLE Handle, BOOLEAN Alertable, PLARGE_INTEGER 
 
 NTSTATUS NtQueryInformationProcess(HANDLE ProcessHandle, ULONG InfoClass,
                                     PVOID Info, ULONG InfoLength, PULONG ReturnLength);
+
+NTSTATUS NtQuerySystemInformation(ULONG SystemInformationClass, PVOID SystemInformation,
+                                   ULONG SystemInformationLength, PULONG ReturnLength);
+
+NTSTATUS NtOpenThread(PHANDLE ThreadHandle, ACCESS_MASK DesiredAccess,
+                       NT_OBJECT_ATTRIBUTES* ObjectAttributes, NT_CLIENT_ID* ClientId);
+
+NTSTATUS NtSuspendThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount);
+
+NTSTATUS NtResumeThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount);
+
+NTSTATUS NtGetContextThread(HANDLE ThreadHandle, PCONTEXT ThreadContext);
+
+NTSTATUS NtSetContextThread(HANDLE ThreadHandle, PCONTEXT ThreadContext);
+
+NTSTATUS NtDelayExecution(BOOLEAN Alertable, PLARGE_INTEGER DelayInterval);
 
 }  // namespace syscall
 
