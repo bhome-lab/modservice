@@ -56,3 +56,17 @@ extern "C" MM_API mm_status MM_CALL mm_execute(
     uint16_t* error_buffer,
     uint32_t error_buffer_capacity,
     uint32_t* error_buffer_written);
+
+// Validate that all dynamically-discovered OS offsets were found.
+// Forces initialization if not already done.
+// Returns 0 on success, or a nonzero bitmask indicating which categories failed:
+//   bit 0: SSN pattern not recognized
+//   bit 1: API Set schema not available
+//   bit 2: BaseThreadInitThunk CALL not found
+//   bit 3: RtlUserThreadStart CALL not found
+//   bit 4: SYSTEM_PROCESS_INFORMATION offsets not validated
+//   -1: initialization failed entirely (check error_buffer)
+extern "C" MM_API int32_t MM_CALL mm_validate_offsets(
+    uint16_t* error_buffer,
+    uint32_t error_buffer_capacity,
+    uint32_t* error_buffer_written);

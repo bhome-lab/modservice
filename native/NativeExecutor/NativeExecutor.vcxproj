@@ -84,12 +84,16 @@
     <ClInclude Include="peb_walk.h" />
     <ClInclude Include="manual_map.h" />
     <ClInclude Include="loader_stub.h" />
+    <ClInclude Include="win_offsets.h" />
+    <ClInclude Include="sysinfo_parser.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="executor.cpp" />
     <ClCompile Include="syscalls.cpp" />
     <ClCompile Include="peb_walk.cpp" />
     <ClCompile Include="manual_map.cpp" />
+    <ClCompile Include="win_offsets.cpp" />
+    <ClCompile Include="sysinfo_parser.cpp" />
     <ClCompile Include="loader_stub.cpp">
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <SDLCheck>false</SDLCheck>

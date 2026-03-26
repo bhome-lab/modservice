@@ -1,7 +1,9 @@
 #include "peb_walk.h"
+#include "win_offsets.h"
 
 #include <algorithm>
 #include <cstring>
+#include <intrin.h>
 
 namespace {
 
@@ -118,26 +120,74 @@ mm_status resolve_forward(HANDLE process, uintptr_t module_base, uint32_t fwd_rv
         }
     }
 
-    // API Set resolution (api-ms-win-*, ext-ms-*).
+    // API Set resolution via PEB.ApiSetMap (no LoadLibrary/GetModuleHandle).
     if (_wcsnicmp(fwd_dll.c_str(), L"api-ms-", 7) == 0 ||
         _wcsnicmp(fwd_dll.c_str(), L"ext-ms-", 7) == 0) {
-        HMODULE local = GetModuleHandleW(fwd_dll.c_str());
-        if (local) {
-            wchar_t real_path[MAX_PATH]{};
-            GetModuleFileNameW(local, real_path, MAX_PATH);
-            const wchar_t* base_name = wcsrchr(real_path, L'\\');
-            base_name = base_name ? base_name + 1 : real_path;
-            for (const auto& mod : modules) {
-                if (_wcsicmp(mod.name.c_str(), base_name) == 0) {
-                    if (fwd_func_a[0] == '#') {
-                        uint16_t ord = static_cast<uint16_t>(atoi(fwd_func_a + 1));
-                        return resolve_remote_export_ordinal(process, mod.base, ord, resolved, modules, error);
+        // Parse ApiSetMap directly from our PEB.
+        std::wstring api_name(fwd_dll);
+        // Strip .dll extension.
+        if (api_name.size() > 4 && _wcsicmp(api_name.c_str() + api_name.size() - 4, L".dll") == 0)
+            api_name.resize(api_name.size() - 4);
+
+        const auto& woff = win_offsets();
+        if (!woff.api_set_available) goto api_set_done;
+
+        {
+        auto* peb = reinterpret_cast<const uint8_t*>(
+            reinterpret_cast<void*>(__readgsqword(0x60)));
+        struct ApiNs { uint32_t V, S, F, C, EO, HO, HF; };
+        struct ApiNsEntry { uint32_t F, NO, NL, HL, VO, VC; };
+        struct ApiValEntry { uint32_t F, NO, NL, VO, VL; };
+        struct ApiHash { uint32_t H, I; };
+
+        auto* ns = *reinterpret_cast<const ApiNs* const*>(peb + woff.peb_api_set_map);
+        if (ns) {
+            auto ns_base = reinterpret_cast<uintptr_t>(ns);
+            size_t hashed_chars = api_name.size();
+            for (size_t i = api_name.size(); i > 0; --i)
+                if (api_name[i - 1] == L'-') { hashed_chars = i - 1; break; }
+
+            uint32_t hash = 0;
+            for (size_t i = 0; i < hashed_chars; ++i) {
+                wchar_t c = api_name[i];
+                if (c >= L'A' && c <= L'Z') c += 32;
+                hash = hash * ns->HF + static_cast<uint32_t>(c);
+            }
+
+            auto* hashes = reinterpret_cast<const ApiHash*>(ns_base + ns->HO);
+            int lo = 0, hi = static_cast<int>(ns->C) - 1;
+            while (lo <= hi) {
+                int mid = (lo + hi) >> 1;
+                if (hash < hashes[mid].H) hi = mid - 1;
+                else if (hash > hashes[mid].H) lo = mid + 1;
+                else {
+                    auto* entries = reinterpret_cast<const ApiNsEntry*>(ns_base + ns->EO);
+                    const auto& e = entries[hashes[mid].I];
+                    auto* cn = reinterpret_cast<const wchar_t*>(ns_base + e.NO);
+                    if (hashed_chars == e.HL / 2 &&
+                        _wcsnicmp(api_name.c_str(), cn, hashed_chars) == 0 && e.VC > 0) {
+                        auto* vals = reinterpret_cast<const ApiValEntry*>(ns_base + e.VO);
+                        if (vals[0].VL > 0) {
+                            auto* host = reinterpret_cast<const wchar_t*>(ns_base + vals[0].VO);
+                            std::wstring host_name(host, vals[0].VL / sizeof(wchar_t));
+                            for (const auto& mod : modules) {
+                                if (_wcsicmp(mod.name.c_str(), host_name.c_str()) == 0) {
+                                    if (fwd_func_a[0] == '#') {
+                                        uint16_t ord = static_cast<uint16_t>(atoi(fwd_func_a + 1));
+                                        return resolve_remote_export_ordinal(process, mod.base, ord, resolved, modules, error);
+                                    }
+                                    return resolve_remote_export(process, mod.base, fwd_func_a, resolved, modules, error);
+                                }
+                            }
+                        }
                     }
-                    return resolve_remote_export(process, mod.base, fwd_func_a, resolved, modules, error);
+                    break;
                 }
             }
         }
+        } // end extra scope
     }
+    api_set_done:
 
     error = L"Forwarded-export module not loaded: " + fwd_dll;
     return MM_EXECUTION_FAILED;

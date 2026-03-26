@@ -1,10 +1,13 @@
 #include "manual_map.h"
 #include "loader_stub.h"
 #include "syscalls.h"
+#include "win_offsets.h"
+#include "sysinfo_parser.h"
 
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <intrin.h>
 
 namespace {
 
@@ -178,11 +181,13 @@ bool process_relocations(std::vector<uint8_t>& image, const PeFile& pe,
             case IMAGE_REL_BASED_ABSOLUTE:
                 break;  // padding
             case IMAGE_REL_BASED_HIGHLOW: {
+                if (target + sizeof(uint32_t) > image.size()) continue;
                 auto* ptr = reinterpret_cast<uint32_t*>(image.data() + target);
                 *ptr += static_cast<uint32_t>(delta);
                 break;
             }
             case IMAGE_REL_BASED_DIR64: {
+                if (target + sizeof(uint64_t) > image.size()) continue;
                 auto* ptr = reinterpret_cast<uint64_t*>(image.data() + target);
                 *ptr += static_cast<uint64_t>(delta);
                 break;
@@ -210,40 +215,121 @@ const RemoteModuleInfo* find_remote_module(const std::vector<RemoteModuleInfo>& 
     return nullptr;
 }
 
+// ── API Set v6 structures (Windows 10+) ──────────────────────────────────────
+
+struct ApiSetNamespace {
+    uint32_t Version;
+    uint32_t Size;
+    uint32_t Flags;
+    uint32_t Count;
+    uint32_t EntryOffset;
+    uint32_t HashOffset;
+    uint32_t HashFactor;
+};
+
+struct ApiSetNamespaceEntry {
+    uint32_t Flags;
+    uint32_t NameOffset;
+    uint32_t NameLength;
+    uint32_t HashedLength;
+    uint32_t ValueOffset;
+    uint32_t ValueCount;
+};
+
+struct ApiSetValueEntry {
+    uint32_t Flags;
+    uint32_t NameOffset;
+    uint32_t NameLength;
+    uint32_t ValueOffset;
+    uint32_t ValueLength;
+};
+
+struct ApiSetHashEntry {
+    uint32_t Hash;
+    uint32_t Index;
+};
+
+// Resolve an API set name to its host DLL name by parsing PEB.ApiSetMap directly.
+// No LoadLibrary/GetModuleHandle calls — pure data reads, no side effects.
+std::wstring resolve_api_set_name(const wchar_t* api_set_name) {
+    if (_wcsnicmp(api_set_name, L"api-", 4) != 0 &&
+        _wcsnicmp(api_set_name, L"ext-", 4) != 0)
+        return {};
+
+    // Strip .dll extension if present.
+    std::wstring name(api_set_name);
+    if (name.size() > 4 && _wcsicmp(name.c_str() + name.size() - 4, L".dll") == 0)
+        name.resize(name.size() - 4);
+
+    // Read ApiSetMap from our PEB using dynamically-discovered offset.
+    const auto& off = win_offsets();
+    if (!off.api_set_available) return {};
+
+    auto* peb_base = reinterpret_cast<const uint8_t*>(
+        reinterpret_cast<void*>(__readgsqword(0x60)));
+    auto* ns = *reinterpret_cast<const ApiSetNamespace* const*>(peb_base + off.peb_api_set_map);
+    if (!ns) return {};
+
+    auto ns_base = reinterpret_cast<uintptr_t>(ns);
+
+    // Find hashed length (up to last hyphen).
+    size_t hashed_chars = name.size();
+    for (size_t i = name.size(); i > 0; --i) {
+        if (name[i - 1] == L'-') { hashed_chars = i - 1; break; }
+    }
+
+    // Compute hash.
+    uint32_t hash = 0;
+    for (size_t i = 0; i < hashed_chars; ++i) {
+        wchar_t c = name[i];
+        if (c >= L'A' && c <= L'Z') c += 32;
+        hash = hash * ns->HashFactor + static_cast<uint32_t>(c);
+    }
+
+    // Binary search the hash table.
+    auto* hash_entries = reinterpret_cast<const ApiSetHashEntry*>(ns_base + ns->HashOffset);
+    int lo = 0, hi = static_cast<int>(ns->Count) - 1;
+    const ApiSetNamespaceEntry* found_entry = nullptr;
+
+    while (lo <= hi) {
+        int mid = (lo + hi) >> 1;
+        if (hash < hash_entries[mid].Hash)       hi = mid - 1;
+        else if (hash > hash_entries[mid].Hash)  lo = mid + 1;
+        else {
+            auto* entries = reinterpret_cast<const ApiSetNamespaceEntry*>(ns_base + ns->EntryOffset);
+            const auto& candidate = entries[hash_entries[mid].Index];
+            auto* cand_name = reinterpret_cast<const wchar_t*>(ns_base + candidate.NameOffset);
+            size_t cand_chars = candidate.HashedLength / sizeof(wchar_t);
+            if (hashed_chars == cand_chars &&
+                _wcsnicmp(name.c_str(), cand_name, cand_chars) == 0)
+                found_entry = &candidate;
+            break;
+        }
+    }
+
+    if (!found_entry || found_entry->ValueCount == 0) return {};
+
+    // Select the default value entry (last one with NameLength == 0).
+    auto* values = reinterpret_cast<const ApiSetValueEntry*>(ns_base + found_entry->ValueOffset);
+    const ApiSetValueEntry* selected = &values[0];
+
+    if (selected->ValueLength == 0) return {};
+    auto* host = reinterpret_cast<const wchar_t*>(ns_base + selected->ValueOffset);
+    return std::wstring(host, selected->ValueLength / sizeof(wchar_t));
+}
+
 // Resolve API Set names (api-ms-win-*, ext-ms-*) to their real implementation DLL.
-// Uses our own process to resolve the mapping, then looks up the real name in the target.
+// Parses PEB.ApiSetMap directly — no LoadLibrary, no GetModuleHandle, no ETW events.
 const RemoteModuleInfo* resolve_api_set(const std::vector<RemoteModuleInfo>& modules,
                                          const wchar_t* api_set_name) {
-    // Only handle api-ms- and ext-ms- prefixes.
     if (_wcsnicmp(api_set_name, L"api-ms-", 7) != 0 &&
         _wcsnicmp(api_set_name, L"ext-ms-", 7) != 0)
         return nullptr;
 
-    // Use GetModuleHandleW locally — the API set resolver in our process
-    // maps these to the real DLL (ucrtbase.dll, kernelbase.dll, etc.).
-    HMODULE local = GetModuleHandleW(api_set_name);
-    if (!local) {
-        // Try loading it as data to trigger the API set resolution.
-        local = LoadLibraryExW(api_set_name, nullptr,
-                               LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (local) {
-            // Get real name, then free.
-            wchar_t real_path[MAX_PATH]{};
-            GetModuleFileNameW(local, real_path, MAX_PATH);
-            FreeLibrary(local);
-            // Extract basename.
-            const wchar_t* base = wcsrchr(real_path, L'\\');
-            base = base ? base + 1 : real_path;
-            return find_remote_module(modules, base);
-        }
-        return nullptr;
-    }
+    std::wstring host_dll = resolve_api_set_name(api_set_name);
+    if (host_dll.empty()) return nullptr;
 
-    wchar_t real_path[MAX_PATH]{};
-    GetModuleFileNameW(local, real_path, MAX_PATH);
-    const wchar_t* base = wcsrchr(real_path, L'\\');
-    base = base ? base + 1 : real_path;
-    return find_remote_module(modules, base);
+    return find_remote_module(modules, host_dll.c_str());
 }
 
 // Find a module among already manually-mapped modules.
@@ -278,6 +364,7 @@ bool resolve_ordinal_from_mapped(const MappedModule& mod, uint16_t ordinal, uint
 
 mm_status resolve_imports(
     HANDLE process,
+    uint32_t target_pid,
     std::vector<uint8_t>& image,
     const PeFile& pe,
     const std::wstring& dll_directory,
@@ -326,7 +413,7 @@ mm_status resolve_imports(
         if (!dep_base) {
             std::wstring dep_path = dll_directory + L"\\" + dll_name_w;
             if (GetFileAttributesW(dep_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                auto st = manual_map_remote(process, dep_path, timeout_ms,
+                auto st = manual_map_remote(process, target_pid, dep_path, timeout_ms,
                                              remote_modules, mapped_modules, error, depth + 1);
                 if (st != MM_OK) return st;
 
@@ -346,7 +433,7 @@ mm_status resolve_imports(
             GetSystemDirectoryW(sys_dir, MAX_PATH);
             std::wstring sys_path = std::wstring(sys_dir) + L"\\" + dll_name_w;
             if (GetFileAttributesW(sys_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                auto st = manual_map_remote(process, sys_path, timeout_ms,
+                auto st = manual_map_remote(process, target_pid, sys_path, timeout_ms,
                                              remote_modules, mapped_modules, error, depth + 1);
                 if (st != MM_OK) return st;
 
@@ -407,6 +494,168 @@ mm_status resolve_imports(
     return MM_OK;
 }
 
+// ── Shared dependency resolution ──────────────────────────────────────────────
+// Used by both resolve_imports and resolve_delay_imports.
+
+struct DepResolution {
+    uintptr_t           base = 0;
+    const MappedModule* mapped = nullptr;
+    bool                use_remote = false;
+};
+
+DepResolution resolve_dependency(
+    HANDLE process,
+    uint32_t target_pid,
+    const std::wstring& dll_name_w,
+    const std::wstring& dll_directory,
+    uint32_t timeout_ms,
+    const std::vector<RemoteModuleInfo>& remote_modules,
+    std::vector<MappedModule>& mapped_modules,
+    std::wstring& error,
+    uint32_t depth)
+{
+    DepResolution dep;
+
+    // 1. Already manually mapped?
+    dep.mapped = find_mapped_module(mapped_modules, dll_name_w.c_str());
+    if (dep.mapped) { dep.base = dep.mapped->base; return dep; }
+
+    // 2. Loaded in target (system DLL)?
+    auto* remote_mod = find_remote_module(remote_modules, dll_name_w.c_str());
+    if (!remote_mod) remote_mod = resolve_api_set(remote_modules, dll_name_w.c_str());
+    if (remote_mod) {
+        dep.base = remote_mod->base;
+        dep.use_remote = true;
+        return dep;
+    }
+
+    // 3. Try to find on disk next to parent DLL.
+    {
+        std::wstring dep_path = dll_directory + L"\\" + dll_name_w;
+        if (GetFileAttributesW(dep_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            auto st = manual_map_remote(process, target_pid, dep_path, timeout_ms,
+                                         remote_modules, mapped_modules, error, depth + 1);
+            if (st != MM_OK) return dep;
+            dep.mapped = find_mapped_module(mapped_modules, dll_name_w.c_str());
+            if (dep.mapped) dep.base = dep.mapped->base;
+            return dep;
+        }
+    }
+
+    // 4. Search System32 (skip api-ms-/ext-ms- stub DLLs).
+    if (_wcsnicmp(dll_name_w.c_str(), L"api-ms-", 7) != 0 &&
+        _wcsnicmp(dll_name_w.c_str(), L"ext-ms-", 7) != 0) {
+        wchar_t sys_dir[MAX_PATH]{};
+        GetSystemDirectoryW(sys_dir, MAX_PATH);
+        std::wstring sys_path = std::wstring(sys_dir) + L"\\" + dll_name_w;
+        if (GetFileAttributesW(sys_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            auto st = manual_map_remote(process, target_pid, sys_path, timeout_ms,
+                                         remote_modules, mapped_modules, error, depth + 1);
+            if (st != MM_OK) return dep;
+            dep.mapped = find_mapped_module(mapped_modules, dll_name_w.c_str());
+            if (dep.mapped) dep.base = dep.mapped->base;
+        }
+    }
+
+    return dep;
+}
+
+// ── Delay-load import resolution ────────────────────────────────────────────
+
+mm_status resolve_delay_imports(
+    HANDLE process,
+    uint32_t target_pid,
+    std::vector<uint8_t>& image,
+    const PeFile& pe,
+    const std::wstring& dll_directory,
+    uint32_t timeout_ms,
+    const std::vector<RemoteModuleInfo>& remote_modules,
+    std::vector<MappedModule>& mapped_modules,
+    std::wstring& error,
+    uint32_t depth)
+{
+    const auto& delay_dir = pe.nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
+    if (delay_dir.VirtualAddress == 0 || delay_dir.Size == 0) return MM_OK;
+
+    struct DelayLoadDescriptor {
+        DWORD grAttrs;
+        DWORD rvaDLLName;
+        DWORD rvaHmod;
+        DWORD rvaIAT;
+        DWORD rvaINT;
+        DWORD rvaBoundIAT;
+        DWORD rvaUnloadIAT;
+        DWORD dwTimeStamp;
+    };
+    static_assert(sizeof(DelayLoadDescriptor) == 32);
+
+    auto* desc = reinterpret_cast<const DelayLoadDescriptor*>(
+        image.data() + delay_dir.VirtualAddress);
+
+    for (; desc->rvaDLLName != 0; ++desc) {
+        const char* dll_name_a = reinterpret_cast<const char*>(image.data() + desc->rvaDLLName);
+        const size_t name_len = strlen(dll_name_a);
+        std::wstring dll_name_w(dll_name_a, dll_name_a + name_len);
+
+        auto dep = resolve_dependency(process, target_pid, dll_name_w, dll_directory, timeout_ms,
+                                       remote_modules, mapped_modules, error, depth);
+        if (!dep.base) {
+            error = L"Cannot resolve delay-load dependency: " + dll_name_w;
+            return MM_EXECUTION_FAILED;
+        }
+
+        // Walk INT (name table) and patch IAT (address table).
+        auto* ilt = reinterpret_cast<const IMAGE_THUNK_DATA64*>(image.data() + desc->rvaINT);
+        auto* iat = reinterpret_cast<IMAGE_THUNK_DATA64*>(image.data() + desc->rvaIAT);
+
+        for (; ilt->u1.AddressOfData != 0; ++ilt, ++iat) {
+            uintptr_t resolved = 0;
+
+            if (IMAGE_SNAP_BY_ORDINAL64(ilt->u1.Ordinal)) {
+                const auto ordinal = static_cast<uint16_t>(IMAGE_ORDINAL64(ilt->u1.Ordinal));
+                if (dep.mapped && !dep.use_remote) {
+                    if (!resolve_ordinal_from_mapped(*dep.mapped, ordinal, resolved)) {
+                        error = L"Delay-load ordinal " + std::to_wstring(ordinal) +
+                                L" not found in " + dll_name_w;
+                        return MM_EXECUTION_FAILED;
+                    }
+                } else {
+                    auto st = resolve_remote_export_ordinal(process, dep.base, ordinal,
+                                                             resolved, remote_modules, error);
+                    if (st != MM_OK) return st;
+                }
+            } else {
+                const auto* hint_name = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(
+                    image.data() + static_cast<uint32_t>(ilt->u1.AddressOfData));
+                const char* func_name = reinterpret_cast<const char*>(hint_name->Name);
+
+                if (dep.mapped && !dep.use_remote) {
+                    if (!resolve_from_mapped(*dep.mapped, func_name, resolved)) {
+                        error = L"Delay-load export not found: ";
+                        error.append(func_name, func_name + strlen(func_name));
+                        error += L" in " + dll_name_w;
+                        return MM_EXECUTION_FAILED;
+                    }
+                } else {
+                    auto st = resolve_remote_export(process, dep.base, func_name,
+                                                     resolved, remote_modules, error);
+                    if (st != MM_OK) return st;
+                }
+            }
+
+            iat->u1.Function = resolved;
+        }
+
+        // Patch the HMODULE store so the delay-load helper thinks the DLL is loaded.
+        if (desc->rvaHmod != 0) {
+            auto* hmod_slot = reinterpret_cast<uint64_t*>(image.data() + desc->rvaHmod);
+            *hmod_slot = dep.base;
+        }
+    }
+
+    return MM_OK;
+}
+
 // ── Section protections ────────────────────────────────────────────────────────
 
 DWORD section_characteristics_to_protect(DWORD ch) {
@@ -443,10 +692,89 @@ mm_status set_section_protections(HANDLE process, uintptr_t remote_base,
     return MM_OK;
 }
 
+// ── SYSTEM_THREAD_INFORMATION layout (x64) ──────────────────────────────────
+// +0x00 KernelTime      LARGE_INTEGER  (8)
+// +0x08 UserTime        LARGE_INTEGER  (8)
+// +0x10 CreateTime      LARGE_INTEGER  (8)
+// +0x18 WaitTime        ULONG          (4)
+// +0x1C (padding)                      (4)
+// +0x20 StartAddress    PVOID          (8)
+// +0x28 ClientId        CLIENT_ID      (16)  — UniqueProcess(8) + UniqueThread(8)
+// +0x38 Priority        LONG           (4)
+// +0x3C BasePriority    LONG           (4)
+// +0x40 ContextSwitches ULONG          (4)
+// +0x44 ThreadState     ULONG          (4)   — 5 = Waiting
+// +0x48 WaitReason      ULONG          (4)
+// Total: 0x50 bytes
+
+// ── Thread enumeration for hijacking ────────────────────────────────────────
+
+// Read the remote PEB.LoaderLock address and the owning thread ID.
+DWORD get_loader_lock_owner(HANDLE process) {
+    const auto& off = win_offsets();
+
+    NT_PROCESS_BASIC_INFORMATION pbi{};
+    syscall::NtQueryInformationProcess(process, 0, &pbi, sizeof(pbi), nullptr);
+    if (pbi.PebBaseAddress == 0) return 0;
+
+    uint64_t loader_lock_ptr = 0;
+    syscall::NtReadVirtualMemory(process,
+        reinterpret_cast<PVOID>(pbi.PebBaseAddress + off.peb_loader_lock),
+        &loader_lock_ptr, sizeof(loader_lock_ptr), nullptr);
+    if (loader_lock_ptr == 0) return 0;
+
+    uint64_t owning_thread = 0;
+    syscall::NtReadVirtualMemory(process,
+        reinterpret_cast<PVOID>(loader_lock_ptr + off.cs_owning_thread),
+        &owning_thread, sizeof(owning_thread), nullptr);
+
+    return static_cast<DWORD>(owning_thread);
+}
+
+DWORD find_target_thread(HANDLE process, uint32_t target_pid) {
+    DWORD loader_lock_tid = get_loader_lock_owner(process);
+
+    auto proc_info = query_process_threads(target_pid);
+    if (!proc_info) return 0;
+
+    DWORD best_tid = 0;
+    uint32_t best_score = 0;
+
+    for (const auto& ti : proc_info->threads) {
+        DWORD tid = static_cast<DWORD>(ti.unique_thread_id);
+
+        // Skip threads that hold the loader lock.
+        if (tid == loader_lock_tid) continue;
+
+        // Only consider threads in Waiting state (5).
+        if (ti.thread_state != 5) continue;
+
+        // Score by wait reason preference:
+        // WrUserRequest(5)=best, WrQueue(4)=good, WrDelayExecution(6)=good,
+        // WrLpcReceive(9)=ok, others=less preferred
+        uint32_t score = 1;
+        if (ti.wait_reason == 5 || ti.wait_reason == 4 || ti.wait_reason == 6)
+            score = 100;
+        else if (ti.wait_reason == 9 || ti.wait_reason == 13)
+            score = 50;
+
+        // Prefer longer waits (more idle).
+        score += (ti.wait_time > 10000) ? 10 : (ti.wait_time / 1000);
+
+        if (score > best_score) {
+            best_score = score;
+            best_tid = tid;
+        }
+    }
+
+    return best_tid;
+}
+
 }  // namespace (end anonymous namespace before execute_remote_stub)
 
-// ── Remote stub execution ──────────────────────────────────────────────────────
-// Allocate code + data pages in target, execute, wait, cleanup (zero + free).
+// ── Remote stub execution via thread hijacking ──────────────────────────────
+// Allocates code + data pages, hijacks an existing thread, waits for
+// completion via polling, restores context, and cleans up.
 
 mm_status execute_remote_stub(HANDLE process, const void* code, size_t code_size,
                                const void* context, size_t context_size,
@@ -460,15 +788,34 @@ mm_status execute_remote_stub(HANDLE process, const void* code, size_t code_size
         return MM_EXECUTION_FAILED;
     }
 
-    // 1. Allocate code page (RW initially).
+    NT_PROCESS_BASIC_INFORMATION _pbi{};
+    syscall::NtQueryInformationProcess(process, 0, &_pbi, sizeof(_pbi), nullptr);
+
+    // The context struct has HijackHeader at the start. Set hijack_mode = 1
+    // so the stub signals completion and exits the thread cleanly via
+    // RtlExitUserThread (no spinloop, no TerminateThread).
+    std::vector<uint8_t> ctx_copy(context_size);
+    memcpy(ctx_copy.data(), context, context_size);
+    auto* hdr = reinterpret_cast<HijackHeader*>(ctx_copy.data());
+    hdr->completed = 0;
+    hdr->result = 0;
+    hdr->hijack_mode = 1;
+
+    // Resolve RtlExitUserThread from the target's ntdll for clean thread exit.
+    {
+        HMODULE local_ntdll = GetModuleHandleW(L"ntdll.dll");
+        auto* local_fn = syscall_find_local_export(local_ntdll, "RtlExitUserThread");
+        // Compute the remote address assuming ntdll is at the same base in the target
+        // (ntdll is always loaded at the same address system-wide on a given boot).
+        hdr->fn_exit_thread = local_fn ? reinterpret_cast<uint64_t>(local_fn) : 0;
+    }
+
+    // 1. Allocate code page.
     SIZE_T code_alloc = align_up(code_size, 0x1000);
     PVOID remote_code = nullptr;
     auto st = syscall::NtAllocateVirtualMemory(process, &remote_code, 0, &code_alloc,
                                                 MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!NT_SUCCESS(st)) {
-        error = L"Failed to allocate remote code page.";
-        return MM_EXECUTION_FAILED;
-    }
+    if (!NT_SUCCESS(st)) { error = L"Failed to allocate remote code page."; return MM_EXECUTION_FAILED; }
 
     // 2. Allocate data page.
     SIZE_T data_alloc = align_up(context_size, 0x1000);
@@ -476,85 +823,82 @@ mm_status execute_remote_stub(HANDLE process, const void* code, size_t code_size
     st = syscall::NtAllocateVirtualMemory(process, &remote_data, 0, &data_alloc,
                                            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!NT_SUCCESS(st)) {
-        // Cleanup code page.
-        SIZE_T zero_sz = 0;
-        syscall::NtFreeVirtualMemory(process, &remote_code, &zero_sz, MEM_RELEASE);
-        error = L"Failed to allocate remote data page.";
-        return MM_EXECUTION_FAILED;
+        SIZE_T z = 0; syscall::NtFreeVirtualMemory(process, &remote_code, &z, MEM_RELEASE);
+        error = L"Failed to allocate remote data page."; return MM_EXECUTION_FAILED;
     }
 
     mm_status result = MM_OK;
 
-    // 3. Write code.
+    // 3. Write code (the real stub directly — no wrapper).
     st = syscall::NtWriteVirtualMemory(process, remote_code, code, code_size, nullptr);
-    if (!NT_SUCCESS(st)) {
-        error = L"Failed to write remote code.";
-        result = MM_EXECUTION_FAILED;
-        goto cleanup;
-    }
+    if (!NT_SUCCESS(st)) { error = L"Failed to write stub code."; result = MM_EXECUTION_FAILED; goto cleanup; }
 
-    // 4. Write context data.
-    st = syscall::NtWriteVirtualMemory(process, remote_data, context, context_size, nullptr);
-    if (!NT_SUCCESS(st)) {
-        error = L"Failed to write remote context.";
-        result = MM_EXECUTION_FAILED;
-        goto cleanup;
-    }
+    // 4. Write context data (with hijack_mode set).
+    st = syscall::NtWriteVirtualMemory(process, remote_data, ctx_copy.data(), ctx_copy.size(), nullptr);
+    if (!NT_SUCCESS(st)) { error = L"Failed to write context."; result = MM_EXECUTION_FAILED; goto cleanup; }
+    SecureZeroMemory(ctx_copy.data(), ctx_copy.size());
 
-    // 5. Set code page to PAGE_EXECUTE_READ.
+    // 5. Set code page to RX.
+    { PVOID p = remote_code; SIZE_T s = code_alloc; ULONG o = 0;
+      st = syscall::NtProtectVirtualMemory(process, &p, &s, PAGE_EXECUTE_READ, &o);
+      if (!NT_SUCCESS(st)) { error = L"Failed to set RX."; result = MM_EXECUTION_FAILED; goto cleanup; } }
+
+    // 6. Execute via NtCreateThreadEx with direct stub execution.
+    // The thread runs the stub code directly. On completion (hijack_mode=1),
+    // the stub signals via HijackHeader.completed and exits cleanly via
+    // RtlExitUserThread — no spinloop, no TerminateThread.
     {
-        PVOID prot_addr = remote_code;
-        SIZE_T prot_size = code_alloc;
-        ULONG old_prot = 0;
-        st = syscall::NtProtectVirtualMemory(process, &prot_addr, &prot_size,
-                                              PAGE_EXECUTE_READ, &old_prot);
-        if (!NT_SUCCESS(st)) {
-            error = L"Failed to set remote code to RX.";
-            result = MM_EXECUTION_FAILED;
-            goto cleanup;
-        }
-    }
-
-    // 6. Create remote thread.
-    {
-        HANDLE thread = nullptr;
-        st = syscall::NtCreateThreadEx(&thread, THREAD_ALL_ACCESS, nullptr, process,
-                                        remote_code, remote_data,
+        HANDLE hThread = nullptr;
+        st = syscall::NtCreateThreadEx(&hThread, THREAD_ALL_ACCESS, nullptr, process,
+                                        remote_code,  // start address = stub entry point
+                                        remote_data,  // parameter = context (HijackHeader at start)
                                         0, 0, 0, 0, nullptr);
-        if (!NT_SUCCESS(st) || !thread) {
+        if (!NT_SUCCESS(st) || !hThread) {
             error = L"NtCreateThreadEx failed.";
             result = MM_EXECUTION_FAILED;
             goto cleanup;
         }
+        ScopedNtHandle thread_handle(hThread);
 
-        // 7. Wait.
-        LARGE_INTEGER timeout{};
-        timeout.QuadPart = timeout_ms == 0
-            ? static_cast<LONGLONG>(-1)
-            : -static_cast<LONGLONG>(timeout_ms) * 10000LL;
-        st = syscall::NtWaitForSingleObject(thread, FALSE, timeout_ms == 0 ? nullptr : &timeout);
+        // Poll for completion via HijackHeader.
+        {
+            const uint32_t poll_interval_ms = 1;
+            const uint32_t max_polls = (timeout_ms == 0 ? 60000 : timeout_ms) / poll_interval_ms;
+            bool completed = false;
 
-        if (!NT_SUCCESS(st)) {
-            // Timeout or wait error — thread may still be running.
-            syscall::NtClose(thread);
-            error = L"Remote thread timed out or wait failed.";
-            result = MM_TIMEOUT;
-            goto cleanup;
+            for (uint32_t p = 0; p < max_polls; ++p) {
+                HijackHeader poll_hdr{};
+                syscall::NtReadVirtualMemory(process, remote_data,
+                                              &poll_hdr, sizeof(poll_hdr), nullptr);
+                if (poll_hdr.completed == 1) {
+                    if (poll_hdr.result != 0) {
+                        error = L"Remote stub returned error code: " +
+                                std::to_wstring(poll_hdr.result);
+                        result = MM_EXECUTION_FAILED;
+                    }
+                    completed = true;
+                    break;
+                }
+                LARGE_INTEGER delay{};
+                delay.QuadPart = -10000LL; // 1ms
+                syscall::NtDelayExecution(FALSE, &delay);
+            }
+
+            if (!completed) {
+                error = L"Remote stub timed out.";
+                result = MM_TIMEOUT;
+            }
         }
 
-        DWORD exit_code = 0;
-        GetExitCodeThread(thread, &exit_code);
-        syscall::NtClose(thread);
-
-        if (exit_code != 0) {
-            error = L"Remote stub returned error code: " + std::to_wstring(exit_code);
-            result = MM_EXECUTION_FAILED;
-            goto cleanup;
-        }
+        // Wait for the thread to exit cleanly (RtlExitUserThread).
+        // Short timeout — the stub already signaled completion, so exit is imminent.
+        LARGE_INTEGER wait_timeout{};
+        wait_timeout.QuadPart = -50000000LL; // 5 seconds
+        syscall::NtWaitForSingleObject(thread_handle.get(), FALSE, &wait_timeout);
     }
 
 cleanup:
-    // Zero both allocations and free them.
+    // Zero and free both allocations.
     {
         std::vector<uint8_t> zeros((std::max)(code_alloc, data_alloc), 0);
 
@@ -613,44 +957,94 @@ struct InvFuncTableHeader {
 static_assert(sizeof(InvFuncTableHeader) == 16);
 #pragma pack(pop)
 
+// Suspend all threads in the target process (for atomic table modification).
+// Returns thread handles (caller must resume + close).
+std::vector<HANDLE> suspend_target_threads(HANDLE /*process*/, uint32_t target_pid) {
+    std::vector<HANDLE> suspended;
+
+    auto proc_info = query_process_threads(target_pid);
+    if (!proc_info) return suspended;
+
+    for (const auto& ti : proc_info->threads) {
+        HANDLE hThread = nullptr;
+        NT_OBJECT_ATTRIBUTES oa{};
+        oa.Length = sizeof(oa);
+        NT_CLIENT_ID cid{};
+        cid.UniqueThread = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(ti.unique_thread_id));
+        auto st = syscall::NtOpenThread(&hThread, THREAD_SUSPEND_RESUME, &oa, &cid);
+        if (NT_SUCCESS(st) && hThread) {
+            ULONG prev = 0;
+            syscall::NtSuspendThread(hThread, &prev);
+            suspended.push_back(hThread);
+        }
+    }
+
+    return suspended;
+}
+
+void resume_and_close_threads(std::vector<HANDLE>& threads) {
+    for (auto h : threads) {
+        syscall::NtResumeThread(h, nullptr);
+        syscall::NtClose(h);
+    }
+    threads.clear();
+}
+
 mm_status insert_inverted_function_table(
     HANDLE process,
+    uint32_t target_pid,
     uintptr_t image_base,
     uint32_t image_size,
     uintptr_t pdata_addr,
     uint32_t pdata_size,
     std::wstring& error)
 {
-    // 1. Find KiUserInvertedFunctionTable address.
-    // ntdll is at the same address in all processes on the same boot.
+    // 1. Find KiUserInvertedFunctionTable via manual export walk (avoids GetProcAddress monitoring).
     HMODULE local_ntdll = GetModuleHandleW(L"ntdll.dll");
-    if (!local_ntdll) { error = L"GetModuleHandleW(ntdll) failed."; return MM_EXECUTION_FAILED; }
-    auto* table_addr = reinterpret_cast<void*>(GetProcAddress(local_ntdll, "KiUserInvertedFunctionTable"));
+    if (!local_ntdll) { error = L"ntdll not loaded."; return MM_EXECUTION_FAILED; }
+    auto* table_addr = syscall_find_local_export(local_ntdll, "KiUserInvertedFunctionTable");
     if (!table_addr) { error = L"KiUserInvertedFunctionTable not found."; return MM_EXECUTION_FAILED; }
 
-    // 2. Read the header.
+    // 2. Suspend all target threads for atomicity.
+    //    For self-injection, this would deadlock — skip it.
+    bool is_self_proc = (target_pid == GetCurrentProcessId());
+    auto suspended = is_self_proc ? std::vector<HANDLE>{} : suspend_target_threads(process, target_pid);
+
+    // 3. Read the header.
     InvFuncTableHeader hdr{};
     auto st = syscall::NtReadVirtualMemory(process, table_addr, &hdr, sizeof(hdr), nullptr);
-    if (!NT_SUCCESS(st)) { error = L"Failed to read inverted function table header."; return MM_EXECUTION_FAILED; }
+    if (!NT_SUCCESS(st)) {
+        resume_and_close_threads(suspended);
+        error = L"Failed to read inverted function table header.";
+        return MM_EXECUTION_FAILED;
+    }
 
-    if (hdr.Count >= hdr.MaxCount) { error = L"Inverted function table is full."; return MM_EXECUTION_FAILED; }
+    if (hdr.Count >= hdr.MaxCount) {
+        resume_and_close_threads(suspended);
+        error = L"Inverted function table is full.";
+        return MM_EXECUTION_FAILED;
+    }
 
-    // 3. Read all entries.
+    // 4. Read all entries.
     const auto entries_addr = reinterpret_cast<uint8_t*>(table_addr) + sizeof(InvFuncTableHeader);
     std::vector<InvFuncTableEntry> entries(hdr.Count);
     if (hdr.Count > 0) {
         st = syscall::NtReadVirtualMemory(process, entries_addr,
                                            entries.data(), hdr.Count * sizeof(InvFuncTableEntry), nullptr);
-        if (!NT_SUCCESS(st)) { error = L"Failed to read inverted function table entries."; return MM_EXECUTION_FAILED; }
+        if (!NT_SUCCESS(st)) {
+            resume_and_close_threads(suspended);
+            error = L"Failed to read inverted function table entries.";
+            return MM_EXECUTION_FAILED;
+        }
     }
 
-    // 4. Find insertion point (sorted by ImageBase ascending).
+    // 5. Find insertion point (sorted by ImageBase ascending).
     size_t insert_pos = 0;
     for (; insert_pos < entries.size(); ++insert_pos) {
         if (entries[insert_pos].ImageBase > image_base) break;
     }
 
-    // 5. Insert our entry.
+    // 6. Insert our entry.
     InvFuncTableEntry our_entry{};
     our_entry.FunctionTable = pdata_addr;
     our_entry.ImageBase     = image_base;
@@ -658,16 +1052,27 @@ mm_status insert_inverted_function_table(
     our_entry.SizeOfTable   = pdata_size;
     entries.insert(entries.begin() + insert_pos, our_entry);
 
-    // 6. Write entries back.
+    // 7. Write entries back.
     st = syscall::NtWriteVirtualMemory(process, entries_addr,
                                         entries.data(), entries.size() * sizeof(InvFuncTableEntry), nullptr);
-    if (!NT_SUCCESS(st)) { error = L"Failed to write inverted function table entries."; return MM_EXECUTION_FAILED; }
+    if (!NT_SUCCESS(st)) {
+        resume_and_close_threads(suspended);
+        error = L"Failed to write inverted function table entries.";
+        return MM_EXECUTION_FAILED;
+    }
 
-    // 7. Update header (Count + Epoch).
+    // 8. Update header (Count + Epoch).
     hdr.Count++;
     hdr.Epoch++;
     st = syscall::NtWriteVirtualMemory(process, table_addr, &hdr, sizeof(hdr), nullptr);
-    if (!NT_SUCCESS(st)) { error = L"Failed to update inverted function table header."; return MM_EXECUTION_FAILED; }
+
+    // 9. Resume all threads.
+    resume_and_close_threads(suspended);
+
+    if (!NT_SUCCESS(st)) {
+        error = L"Failed to update inverted function table header.";
+        return MM_EXECUTION_FAILED;
+    }
 
     return MM_OK;
 }
@@ -690,6 +1095,7 @@ std::wstring directory_from_path(const std::wstring& path) {
 
 mm_status manual_map_remote(
     HANDLE process,
+    uint32_t target_pid,
     const std::wstring& dll_path,
     uint32_t timeout_ms,
     const std::vector<RemoteModuleInfo>& remote_modules,
@@ -781,7 +1187,7 @@ mm_status manual_map_remote(
 
     // ── 6. Resolve imports ─────────────────────────────────────────────────────
     {
-        auto rstatus = resolve_imports(process, local_image, pe, dll_dir, timeout_ms,
+        auto rstatus = resolve_imports(process, target_pid, local_image, pe, dll_dir, timeout_ms,
                                         remote_modules, mapped_modules, error, depth);
         if (rstatus != MM_OK) {
             remove_self();
@@ -789,6 +1195,27 @@ mm_status manual_map_remote(
             syscall::NtFreeVirtualMemory(process, &remote_base, &free_sz, MEM_RELEASE);
             return rstatus;
         }
+    }
+
+    // ── 6b. Resolve delay-load imports ─────────────────────────────────────────
+    {
+        auto dstatus = resolve_delay_imports(process, target_pid, local_image, pe, dll_dir,
+                                              timeout_ms, remote_modules, mapped_modules,
+                                              error, depth);
+        if (dstatus != MM_OK) {
+            remove_self();
+            SIZE_T free_sz = 0;
+            syscall::NtFreeVirtualMemory(process, &remote_base, &free_sz, MEM_RELEASE);
+            return dstatus;
+        }
+    }
+
+    // ── 6c. Zero bound import directory (stale timestamps) ──────────────────
+    {
+        auto* local_nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(
+            local_image.data() + pe.dos->e_lfanew);
+        local_nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT].VirtualAddress = 0;
+        local_nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT].Size = 0;
     }
 
     // ── 7. Write image to target ──────────────────────────────────────────────
@@ -822,7 +1249,7 @@ mm_status manual_map_remote(
         const auto pdata = get_pdata_info(pe);
         if (pdata.rva && pdata.count > 0) {
             auto inv_st = insert_inverted_function_table(
-                process, rb, static_cast<uint32_t>(pe.nt->OptionalHeader.SizeOfImage),
+                process, target_pid, rb, static_cast<uint32_t>(pe.nt->OptionalHeader.SizeOfImage),
                 rb + pdata.rva,
                 pdata.count * static_cast<uint32_t>(sizeof(RUNTIME_FUNCTION)),
                 error);
@@ -836,32 +1263,17 @@ mm_status manual_map_remote(
     // ── 11. Execute _DllMainCRTStartup via loader stub ─────────────────────────
     //    The CRT entry point handles ALL initialization: security cookie, CRT
     //    init, TLS setup, static constructors, and the user's DllMain.
+    //    SEH is already registered via insert_inverted_function_table (step 10),
+    //    so no RtlAddFunctionTable call needed (avoids dynamic function table
+    //    enumeration by anti-cheats).
     {
-        const auto pdata = get_pdata_info(pe);
         const auto ep = pe.nt->OptionalHeader.AddressOfEntryPoint;
-
-        // Resolve RtlAddFunctionTable from remote ntdll/kernel32 (best-effort).
-        uintptr_t fn_rtl_add = 0;
-        {
-            std::wstring ignore_err;
-            for (const auto& mod : remote_modules) {
-                if (fn_rtl_add != 0) break;
-                if (_wcsicmp(mod.name.c_str(), L"ntdll.dll") == 0 ||
-                    _wcsicmp(mod.name.c_str(), L"kernel32.dll") == 0) {
-                    resolve_remote_export(process, mod.base, "RtlAddFunctionTable",
-                                           fn_rtl_add, remote_modules, ignore_err);
-                }
-            }
-        }
 
         std::vector<uint8_t> ctx_buf(sizeof(DllMainContext), 0);
         auto* ctx = reinterpret_cast<DllMainContext*>(ctx_buf.data());
 
-        ctx->image_base              = rb;
-        ctx->entry_point             = ep ? rb + ep : 0;
-        ctx->fn_rtl_add_function_table = fn_rtl_add;
-        ctx->pdata_base              = pdata.rva ? rb + pdata.rva : 0;
-        ctx->pdata_entry_count       = pdata.count;
+        ctx->image_base  = rb;
+        ctx->entry_point = ep ? rb + ep : 0;
 
         const auto stub = get_stub_info(reinterpret_cast<void*>(&dllmain_stub));
         if (!stub.code || stub.size == 0) {
@@ -888,34 +1300,66 @@ mm_status manual_map_remote(
     // ── 12. Erase PE headers from remote memory (stealth) ─────────────────────
     // The CRT's _ValidateImageBase checks for DOS/NT signatures at the module
     // base during security cookie operations and _IsNonwritableInCurrentImage.
-    // We preserve just the minimum fields and zero everything else.
+    // We preserve just the minimum fields needed by the CRT and fill everything
+    // else with random bytes (not zeros — a zeroed page at allocation base is
+    // itself a scannable pattern).
     {
         const auto hdr_size = pe.nt->OptionalHeader.SizeOfHeaders;
         const auto e_lfanew = pe.dos->e_lfanew;
 
-        std::vector<uint8_t> scrubbed(hdr_size, 0);
+        // Fill with random bytes to avoid zero-page detection.
+        std::vector<uint8_t> scrubbed(hdr_size);
+        for (size_t i = 0; i < hdr_size; ++i)
+            scrubbed[i] = static_cast<uint8_t>(__rdtsc() ^ (i * 7));
 
-        // IMAGE_DOS_HEADER.e_magic ('MZ') at offset 0
+        // IMAGE_DOS_HEADER.e_magic ('MZ') at offset 0 — required by _ValidateImageBase.
         scrubbed[0] = 'M'; scrubbed[1] = 'Z';
         // IMAGE_DOS_HEADER.e_lfanew at offset 0x3C
         memcpy(scrubbed.data() + 0x3C, &e_lfanew, sizeof(e_lfanew));
-        // IMAGE_NT_HEADERS64.Signature ('PE') at e_lfanew
+        // IMAGE_NT_HEADERS64.Signature ('PE') at e_lfanew — required by _ValidateImageBase.
         scrubbed[e_lfanew] = 'P'; scrubbed[e_lfanew + 1] = 'E';
+        scrubbed[e_lfanew + 2] = 0;  scrubbed[e_lfanew + 3] = 0;
+        // IMAGE_FILE_HEADER.Machine at e_lfanew + 4
+        {
+            WORD machine = IMAGE_FILE_MACHINE_AMD64;
+            memcpy(scrubbed.data() + e_lfanew + 4, &machine, sizeof(WORD));
+        }
         // IMAGE_FILE_HEADER.NumberOfSections at e_lfanew + 6
         memcpy(scrubbed.data() + e_lfanew + 6,
                &pe.nt->FileHeader.NumberOfSections, sizeof(WORD));
         // IMAGE_OPTIONAL_HEADER64.Magic at e_lfanew + 0x18
         scrubbed[e_lfanew + 0x18] = 0x0B; scrubbed[e_lfanew + 0x19] = 0x02;
-        // IMAGE_OPTIONAL_HEADER64.SizeOfImage at e_lfanew + 0x38
-        memcpy(scrubbed.data() + e_lfanew + 0x38,
+        // IMAGE_OPTIONAL_HEADER64.ImageBase at e_lfanew + 0x30
+        {
+            uint64_t relocated_base = rb;
+            memcpy(scrubbed.data() + e_lfanew + 0x30, &relocated_base, sizeof(uint64_t));
+        }
+        // OptionalHeader starts at e_lfanew + sizeof(Signature) + sizeof(IMAGE_FILE_HEADER) = e_lfanew + 0x18
+        constexpr DWORD kOptHdrBase = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER); // 0x18
+        // IMAGE_OPTIONAL_HEADER64.SizeOfImage at e_lfanew + 0x18 + offsetof(..., SizeOfImage)
+        constexpr DWORD kSizeOfImageOff = kOptHdrBase + static_cast<DWORD>(offsetof(IMAGE_OPTIONAL_HEADER64, SizeOfImage));
+        memcpy(scrubbed.data() + e_lfanew + kSizeOfImageOff,
                &pe.nt->OptionalHeader.SizeOfImage, sizeof(DWORD));
-        // Preserve section headers (needed for _IsNonwritableInCurrentImage to
-        // determine which sections are read-only).
+        // IMAGE_OPTIONAL_HEADER64.SizeOfHeaders at e_lfanew + 0x18 + offsetof(..., SizeOfHeaders)
+        constexpr DWORD kSizeOfHdrsOff = kOptHdrBase + static_cast<DWORD>(offsetof(IMAGE_OPTIONAL_HEADER64, SizeOfHeaders));
+        memcpy(scrubbed.data() + e_lfanew + kSizeOfHdrsOff,
+               &pe.nt->OptionalHeader.SizeOfHeaders, sizeof(DWORD));
+
+        // Preserve section headers for _IsNonwritableInCurrentImage, but scrub
+        // section names (EDR scanners look for ".text", ".rdata", ".data" etc.).
         const auto sec_offset = reinterpret_cast<const uint8_t*>(pe.sections) - pe.raw.data();
-        const auto sec_size = pe.nt->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER);
+        const auto num_sections = pe.nt->FileHeader.NumberOfSections;
+        const auto sec_size = num_sections * sizeof(IMAGE_SECTION_HEADER);
         if (sec_offset + sec_size <= hdr_size) {
             memcpy(scrubbed.data() + sec_offset,
                    pe.raw.data() + sec_offset, sec_size);
+            // Zero out section names (first 8 bytes of each IMAGE_SECTION_HEADER).
+            // CRT only uses VirtualAddress, SizeOfRawData, and Characteristics.
+            for (WORD i = 0; i < num_sections; ++i) {
+                auto* sec = reinterpret_cast<IMAGE_SECTION_HEADER*>(
+                    scrubbed.data() + sec_offset + i * sizeof(IMAGE_SECTION_HEADER));
+                memset(sec->Name, 0, sizeof(sec->Name));
+            }
         }
 
         syscall::NtWriteVirtualMemory(process, remote_base, scrubbed.data(), hdr_size, nullptr);
