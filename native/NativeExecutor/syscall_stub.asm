@@ -1,27 +1,15 @@
-;; ── ssn_dispatch — thread-safe indirect syscall with spoofed return addr ─────
+;; ── ssn_dispatch — indirect syscall via gadget in ntdll ──────────────────────
 ;;
 ;; C++ call: ssn_dispatch(SSN, arg1, arg2, arg3, arg4, arg5, ...)
 ;;   RCX=SSN, RDX=a1, R8=a2, R9=a3, [RSP+28h]=a4, [RSP+30h]=a5, ...
 ;;
 ;; Rearranges to NT convention (R10=a1), loads SSN into EAX,
-;; optionally sets a JMP[RBX] gadget in kernelbase as the return address
-;; (if g_spoof_config is initialized), then jumps to syscall;ret in ntdll.
+;; then jumps to syscall;ret in ntdll.
 
 .data
 EXTERN g_syscall_gadget: QWORD
-EXTERN g_spoof_config:   BYTE    ; SpoofConfig struct, first QWORD = jmp_rbx_gadget
 
 .code
-
-;; ── spoof_fixup — restores state after: syscall;ret → JMP[RBX] → here ──────
-spoof_fixup PROC
-    add     rsp, 58h         ; undo sub 60h minus 8 (ret consumed 8)
-    add     rsp, 20h         ; undo shadow
-    pop     rbx
-    pop     r13
-    pop     r12
-    ret
-spoof_fixup ENDP
 
 ssn_dispatch PROC
     ;; ── Prologue ────────────────────────────────────────────────────────────
@@ -47,28 +35,10 @@ ssn_dispatch PROC
     ;; ── Build syscall stack frame (60h bytes below) ─────────────────────────
     sub     rsp, 60h
 
-    ;; ── Check if spoofing is available ──────────────────────────────────────
-    mov     rcx, QWORD PTR [g_spoof_config]   ; jmp_rbx_gadget
-    test    rcx, rcx
-    jz      use_plain_return
-
-    ;; ── Spoofed return: JMP [RBX] gadget in kernelbase ──────────────────────
-    mov     QWORD PTR [rsp], rcx               ; return addr = JMP [RBX] gadget
-
-    ;; Store fixup addr in caller shadow, point RBX to it.
-    ;; Caller shadow[0] is at rsp + 60h + 40h = rsp + A0h.
-    lea     rbx, [spoof_fixup]
-    mov     QWORD PTR [rsp + 0A0h], rbx
-    lea     rbx, [rsp + 0A0h]                  ; RBX → cell with fixup addr
-
-    jmp     copy_args
-
-use_plain_return:
-    ;; ── Plain return: come back to our done label ───────────────────────────
+    ;; ── Set return address to our done label ────────────────────────────────
     lea     rcx, [done]
     mov     QWORD PTR [rsp], rcx
 
-copy_args:
     ;; Copy NT args 5-11 from original positions.
     ;; Before sub 60h, arg5 (NT) was at [rsp_before + 68h] = [rsp + 60h + 68h] = [rsp + C8h]
     mov     rcx, QWORD PTR [rsp + 0C8h]
@@ -88,11 +58,10 @@ copy_args:
 
     ;; ── Execute syscall ─────────────────────────────────────────────────────
     jmp     QWORD PTR [g_syscall_gadget]
-    ;; Spoofed path: syscall;ret → JMP[RBX] → spoof_fixup (restores via add rsp)
-    ;; Plain path:   syscall;ret → done
+    ;; syscall;ret → done
 
 done:
-    ;; Plain path epilogue (ret consumed 8 bytes from our sub 60h).
+    ;; ret consumed 8 bytes from our sub 60h frame.
     add     rsp, 58h
     add     rsp, 20h
     pop     rbx

@@ -8,7 +8,6 @@
 // ── Shared state (read by the ASM trampoline) ──────────────────────────────────
 
 extern "C" void*       g_syscall_gadget = nullptr;
-extern "C" SpoofConfig g_spoof_config   = {};
 
 namespace {
 
@@ -196,147 +195,6 @@ void* find_local_export_impl(HMODULE mod, const char* name) {
     return nullptr;
 }
 
-// ── Stack spoof helpers ──────────────────────────────────────────────────────
-
-// Calculate the total stack frame size from UNWIND_INFO.
-uint32_t calculate_frame_size(PRUNTIME_FUNCTION prf, uintptr_t image_base) {
-    auto* ui = reinterpret_cast<const uint8_t*>(image_base + prf->UnwindData);
-    // UNWIND_INFO layout: Version:3 Flags:5 SizeOfProlog:8 CountOfCodes:8 FrameReg:4 FrameOff:4
-    uint8_t count_of_codes = ui[2];
-    const auto* codes = reinterpret_cast<const uint16_t*>(ui + 4);
-
-    uint32_t frame_size = 0;
-    for (int i = 0; i < count_of_codes; ) {
-        uint8_t op   = (codes[i] >> 8) & 0xF;   // UnwindOp
-        uint8_t info = (codes[i] >> 12) & 0xF;   // OpInfo
-
-        switch (op) {
-        case 0: // UWOP_PUSH_NONVOL
-            frame_size += 8;
-            i += 1;
-            break;
-        case 1: // UWOP_ALLOC_LARGE
-            if (info == 0) {
-                frame_size += codes[i + 1] * 8;
-                i += 2;
-            } else {
-                frame_size += *reinterpret_cast<const uint32_t*>(&codes[i + 1]);
-                i += 3;
-            }
-            break;
-        case 2: // UWOP_ALLOC_SMALL
-            frame_size += (info + 1) * 8;
-            i += 1;
-            break;
-        case 3: // UWOP_SET_FPREG
-            i += 1;
-            break;
-        case 4: // UWOP_SAVE_NONVOL
-            i += 2;
-            break;
-        case 5: // UWOP_SAVE_NONVOL_FAR
-            i += 3;
-            break;
-        case 6: // UWOP_EPILOG (v2)
-            i += 2;
-            break;
-        case 8: // UWOP_SAVE_XMM128
-            i += 2;
-            break;
-        case 9: // UWOP_SAVE_XMM128_FAR
-            i += 3;
-            break;
-        default:
-            i += 1;
-            break;
-        }
-    }
-    return frame_size + 8; // +8 for return address slot
-}
-
-// Find a JMP [RBX] gadget (FF 23) in a module's .text section that is covered
-// by a RUNTIME_FUNCTION entry (so the unwinder can process the frame).
-void* find_jmp_rbx_gadget(HMODULE mod) {
-    const auto base = reinterpret_cast<uintptr_t>(mod);
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(mod);
-    const auto* nt  = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-    const auto* sec = IMAGE_FIRST_SECTION(nt);
-
-    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
-        if (memcmp(sec[i].Name, ".text", 5) != 0) continue;
-
-        auto* start = reinterpret_cast<uint8_t*>(base + sec[i].VirtualAddress);
-        const auto size = sec[i].Misc.VirtualSize;
-
-        for (DWORD j = 0; j + 1 < size; ++j) {
-            if (start[j] == 0xFF && start[j + 1] == 0x23) {
-                // Verify this is inside a RUNTIME_FUNCTION range.
-                ULONG64 img_base = 0;
-                auto* rf = RtlLookupFunctionEntry(
-                    reinterpret_cast<ULONG64>(start + j), &img_base, nullptr);
-                if (rf) return start + j;
-            }
-        }
-    }
-    return nullptr;
-}
-
-bool init_spoof_config(std::wstring& error) {
-    // 1. Find JMP [RBX] gadget in kernelbase.dll.
-    HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
-    if (!kernelbase) {
-        error = L"kernelbase.dll not loaded.";
-        return false;
-    }
-    g_spoof_config.jmp_rbx_gadget = find_jmp_rbx_gadget(kernelbase);
-    if (!g_spoof_config.jmp_rbx_gadget) {
-        error = L"Failed to find JMP [RBX] gadget in kernelbase.";
-        return false;
-    }
-
-    // 2. Gadget frame size (the RUNTIME_FUNCTION containing our gadget).
-    {
-        ULONG64 img_base = 0;
-        auto* rf = RtlLookupFunctionEntry(
-            reinterpret_cast<ULONG64>(g_spoof_config.jmp_rbx_gadget), &img_base, nullptr);
-        if (!rf) { error = L"Gadget has no RUNTIME_FUNCTION."; return false; }
-        g_spoof_config.gadget_frame.stack_size = calculate_frame_size(rf, img_base);
-        g_spoof_config.gadget_frame.ret_addr = nullptr;
-    }
-
-    // 3. BaseThreadInitThunk frame.
-    {
-        HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
-        if (!k32) { error = L"kernel32.dll not loaded."; return false; }
-        auto* btt = find_local_export_impl(k32, "BaseThreadInitThunk");
-        if (!btt) { error = L"BaseThreadInitThunk not found."; return false; }
-
-        ULONG64 img_base = 0;
-        auto* rf = RtlLookupFunctionEntry(
-            reinterpret_cast<ULONG64>(btt), &img_base, nullptr);
-        if (!rf) { error = L"BaseThreadInitThunk has no RUNTIME_FUNCTION."; return false; }
-        g_spoof_config.frame1.stack_size = calculate_frame_size(rf, img_base);
-        g_spoof_config.frame1.ret_addr = win_offsets().btt_call_addr;
-    }
-
-    // 4. RtlUserThreadStart frame.
-    {
-        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        if (!ntdll) { error = L"ntdll.dll not loaded."; return false; }
-        auto* ruts = find_local_export_impl(ntdll, "RtlUserThreadStart");
-        if (!ruts) { error = L"RtlUserThreadStart not found."; return false; }
-
-        ULONG64 img_base = 0;
-        auto* rf = RtlLookupFunctionEntry(
-            reinterpret_cast<ULONG64>(ruts), &img_base, nullptr);
-        if (!rf) { error = L"RtlUserThreadStart has no RUNTIME_FUNCTION."; return false; }
-        g_spoof_config.frame2.stack_size = calculate_frame_size(rf, img_base);
-        g_spoof_config.frame2.ret_addr = win_offsets().ruts_call_addr;
-    }
-
-    return true;
-}
-
 }  // namespace
 
 // ── Public API ─────────────────────────────────────────────────────────────────
@@ -385,12 +243,6 @@ bool syscall_init(std::wstring& error) {
     // 4. Discover OS-specific offsets (requires working syscalls from steps 1-3).
     if (!win_offsets_init(error)) return false;
 
-    // 5. Initialize stack spoofing configuration (best-effort — non-fatal).
-    {
-        std::wstring spoof_err;
-        init_spoof_config(spoof_err);
-        // If it fails, g_spoof_config.jmp_rbx_gadget stays null → ASM uses fallback path.
-    }
 
     // Wipe the disk buffer (no need to keep it around).
     SecureZeroMemory(ntdll_disk.data(), ntdll_disk.size());
@@ -398,81 +250,10 @@ bool syscall_init(std::wstring& error) {
 }
 
 // ── Wrapper implementations ────────────────────────────────────────────────────
-// Each wrapper: load SSN into EAX (via the table), cast spoofed trampoline, call.
-// The SSN is passed in EAX directly — no global race.
-
-#define SYSCALL_INVOKE(id, fn_type, ...) \
-    do { \
-        using _fn = fn_type; \
-        /* The ASM stub expects: EAX = SSN, then standard NT arg registers. */ \
-        /* We use a two-instruction inline: mov eax, ssn ; then call stub.  */ \
-        /* Since we can't inline ASM on MSVC x64, we use a helper approach: */ \
-        /* store SSN in eax by calling the stub which reads it from eax.    */ \
-        /* The stub is declared as taking the same args but with EAX preset.*/ \
-        return reinterpret_cast<_fn>(&spoofed_syscall_stub)(__VA_ARGS__); \
-    } while (0)
-
-// Thread-safe: each wrapper loads its own SSN into EAX before the call.
-// The spoofed_syscall_stub reads EAX (set by the C++ code before the call via
-// the SSN-loading thunk), NOT from a global.
-
-// Helper: we generate per-syscall thunks that set EAX then jump to the stub.
-// Since MSVC x64 doesn't support inline ASM, we use the approach of casting
-// the stub function pointer and relying on the calling convention to pass
-// the SSN. We store it in a caller-saved register via a tiny wrapper.
-
-// Simplified approach: since the spoofed_syscall_stub now reads SSN from the
-// g_spoof_config (thread-safe because it's read-only after init) and we pass
-// the SSN as the *first implicit parameter* by loading it before the call,
-// we use a per-ID stub table.
-
-// Actually, the cleanest MSVC x64 approach: have the ASM stub accept the SSN
-// in a register that doesn't conflict with the NT calling convention.
-// NT uses: R10=arg1, RDX=arg2, R8=arg3, R9=arg4, stack=arg5+
-// Windows x64 uses: RCX=arg1, RDX=arg2, R8=arg3, R9=arg4
-// The stub moves RCX→R10, so RCX is free. We'll pass SSN in EAX by having
-// each wrapper set it before the call — but MSVC can't set EAX inline.
-//
-// Solution: generate a dispatch function per syscall in the .asm file,
-// OR use a trampoline that accepts the SSN as a hidden first stack arg.
-// We'll use the stack approach: push SSN to [rsp+?] before calling the stub.
-// But this conflicts with the real args.
-//
-// FINAL approach (simplest, proven): use __declspec(thread) for the SSN.
-// This is a single TLS read per call — no contention.
-
-static __declspec(thread) uint32_t t_syscall_ssn = 0;
-
-// The ASM stub reads from t_syscall_ssn via the TLS slot.
-// We export the TLS index for the ASM to use.
-extern "C" uint32_t _tls_index;  // CRT provides this
-
-// Actually, MASM can't easily access C++ TLS variables. Let's use the simplest
-// correct approach: a per-thread SSN stored in a location the ASM can read.
-// We'll use a regular thread-local and have each wrapper call an intermediate
-// function that sets EAX from the thread-local, then jumps to the real stub.
-
-// Simplest working approach with MASM: keep a global but protect with a
-// spinlock per call. Too slow.
-
-// BEST approach: the C wrapper calls a helper that receives SSN as first arg,
-// shuffles args, and calls the spoofed stub. We write this helper in ASM.
-// The helper signature: ssn_dispatch(uint32_t ssn, arg1, arg2, arg3, arg4, ...)
-// It moves: ECX(ssn)->EAX, RDX->RCX, R8->RDX, R9->R8, stack[5]->R9, etc.
-// Then falls through to spoofed_syscall_stub logic.
-
-// Let's declare this:
-extern "C" NTSTATUS ssn_dispatch();
-// ssn_dispatch expects: ECX = SSN, RDX = arg1, R8 = arg2, R9 = arg3,
-//                       stack = arg4, arg5, ...
-// It rearranges to NT convention and does the spoofed syscall.
-
-// For 4-arg syscalls:  ssn_dispatch(ssn, a1, a2, a3)  → a4 not needed
-// For 5-arg syscalls:  ssn_dispatch(ssn, a1, a2, a3, a4)
-// For 6-arg syscalls:  ssn_dispatch(ssn, a1, a2, a3, a4, a5)
-// etc.
-
 // Each wrapper casts ssn_dispatch to the right signature with SSN prepended.
+// ssn_dispatch (ASM) expects: ECX = SSN, RDX = arg1, R8 = arg2, R9 = arg3,
+//                             stack = arg4, arg5, ...
+// It rearranges to NT convention and executes the syscall.
 
 NTSTATUS syscall::NtOpenProcess(PHANDLE ph, ACCESS_MASK access,
                                 NT_OBJECT_ATTRIBUTES* oa, NT_CLIENT_ID* cid) {

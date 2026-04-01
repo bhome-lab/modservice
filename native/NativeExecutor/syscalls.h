@@ -131,24 +131,8 @@ uint32_t syscall_get_ssn(SyscallId id);
 // The indirect syscall gadget address (set once at init).
 extern "C" void*     g_syscall_gadget;
 
-// ── Stack spoofing state (set once at init) ─────────────────────────────────
-
-struct SpoofFrame {
-    uint32_t stack_size;    // total frame size for unwinder
-    void*    ret_addr;      // spoofed return address
-};
-
-struct SpoofConfig {
-    void*      jmp_rbx_gadget;  // address of FF 23 (jmp [rbx]) in kernelbase
-    SpoofFrame gadget_frame;    // frame for the gadget function
-    SpoofFrame frame1;          // BaseThreadInitThunk frame
-    SpoofFrame frame2;          // RtlUserThreadStart frame
-};
-
-extern "C" SpoofConfig g_spoof_config;
-
 // The dispatch function: takes SSN as first arg, rearranges to NT convention,
-// builds a spoofed return address, and executes the syscall.
+// and executes the syscall via an indirect gadget in ntdll.
 // Called as: ssn_dispatch(ssn, arg1, arg2, arg3, arg4, arg5, ...)
 extern "C" NTSTATUS  ssn_dispatch();
 

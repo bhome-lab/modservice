@@ -26,10 +26,6 @@ struct WinOffsets {
     // ── RTL_CRITICAL_SECTION ──
     uint32_t cs_owning_thread;           // Offset of OwningThread
 
-    // ── Stack spoof return addresses ──
-    void*    btt_call_addr;              // Return addr inside BaseThreadInitThunk (after first CALL)
-    void*    ruts_call_addr;             // Return addr inside RtlUserThreadStart (after first CALL)
-
     // ── API Set ──
     uint32_t api_set_version;            // Discovered schema version
     bool     api_set_available;          // Whether API Set schema v6 was found and usable
