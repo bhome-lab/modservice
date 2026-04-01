@@ -96,45 +96,11 @@ struct NT_PROCESS_BASIC_INFORMATION {
 };
 static_assert(sizeof(NT_PROCESS_BASIC_INFORMATION) == 0x30);
 
-// ── Syscall table ──────────────────────────────────────────────────────────────
-
-enum class SyscallId : uint32_t {
-    NtOpenProcess = 0,
-    NtClose,
-    NtAllocateVirtualMemory,
-    NtFreeVirtualMemory,
-    NtReadVirtualMemory,
-    NtWriteVirtualMemory,
-    NtProtectVirtualMemory,
-    NtCreateThreadEx,
-    NtWaitForSingleObject,
-    NtQueryInformationProcess,
-    NtQuerySystemInformation,
-    NtOpenThread,
-    NtSuspendThread,
-    NtResumeThread,
-    NtGetContextThread,
-    NtSetContextThread,
-    NtDelayExecution,
-    Count
-};
-
 // Must be called once before any syscall:: function.
 bool syscall_init(std::wstring& error);
 
 // Manual export table walk — avoids GetProcAddress monitoring.
 void* syscall_find_local_export(HMODULE mod, const char* name);
-
-// Get the SSN for a given syscall ID (after init).
-uint32_t syscall_get_ssn(SyscallId id);
-
-// The indirect syscall gadget address (set once at init).
-extern "C" void*     g_syscall_gadget;
-
-// The dispatch function: takes SSN as first arg, rearranges to NT convention,
-// and executes the syscall via an indirect gadget in ntdll.
-// Called as: ssn_dispatch(ssn, arg1, arg2, arg3, arg4, arg5, ...)
-extern "C" NTSTATUS  ssn_dispatch();
 
 // ── Syscall wrappers ───────────────────────────────────────────────────────────
 

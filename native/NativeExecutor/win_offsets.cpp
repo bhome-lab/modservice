@@ -168,34 +168,6 @@ bool discover_peb_offsets(WinOffsets& off, std::wstring& error) {
     return true;
 }
 
-// ── SSN pattern validation ──────────────────────────────────────────────────
-
-bool validate_ssn_pattern(WinOffsets& off, std::wstring& error) {
-    // Read a known syscall stub from the in-memory ntdll and check the pattern.
-    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-    if (!ntdll) { error = L"ntdll.dll not loaded for SSN validation."; return false; }
-
-    auto* stub = static_cast<const uint8_t*>(syscall_find_local_export(ntdll, "NtClose"));
-    if (!stub) { error = L"NtClose not found for SSN validation."; return false; }
-
-    // Primary: 4C 8B D1 B8 (mov r10, rcx; mov eax, imm32)
-    if (stub[0] == 0x4C && stub[1] == 0x8B && stub[2] == 0xD1 && stub[3] == 0xB8) {
-        off.ssn_pattern_validated = true;
-        return true;
-    }
-
-    // Alternative: 49 89 CA B8 (mov r10, rcx alternate encoding; mov eax, imm32)
-    if (stub[0] == 0x49 && stub[1] == 0x89 && stub[2] == 0xCA && stub[3] == 0xB8) {
-        off.ssn_pattern_validated = true;
-        return true;
-    }
-
-    error = L"Unrecognized ntdll syscall stub pattern: " +
-            std::to_wstring(stub[0]) + L" " + std::to_wstring(stub[1]) + L" " +
-            std::to_wstring(stub[2]) + L" " + std::to_wstring(stub[3]);
-    return false;
-}
-
 }  // namespace
 
 // ── Public API ──────────────────────────────────────────────────────────────────
@@ -211,9 +183,6 @@ bool win_offsets_init(std::wstring& error) {
 
     // PEB offsets (ApiSetMap, LoaderLock).
     if (!discover_peb_offsets(g_offsets, error)) return false;
-
-    // SSN pattern.
-    if (!validate_ssn_pattern(g_offsets, error)) return false;
 
     g_offsets.initialized = true;
     return true;

@@ -30,9 +30,6 @@ struct WinOffsets {
     uint32_t api_set_version;            // Discovered schema version
     bool     api_set_available;          // Whether API Set schema v6 was found and usable
 
-    // ── SSN ──
-    bool     ssn_pattern_validated;      // Whether the ntdll syscall stub pattern was recognized
-
     bool     initialized;
 };
 

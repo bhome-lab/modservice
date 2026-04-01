@@ -549,13 +549,11 @@ extern "C" int32_t MM_CALL mm_validate_offsets(
 
     const auto& off = win_offsets();
     int32_t result = 0;
-    if (!off.ssn_pattern_validated)    result |= 1;
     if (!off.api_set_available)        result |= 2;
     if (off.spi_unique_process_id == 0) result |= 16;
 
     if (result != 0) {
         std::wstring detail = L"Offset validation failures: ";
-        if (result & 1)  detail += L"SSN ";
         if (result & 2)  detail += L"ApiSet ";
         if (result & 16) detail += L"SPI ";
         write_error(detail, error_buffer, error_buffer_capacity, error_buffer_written);
