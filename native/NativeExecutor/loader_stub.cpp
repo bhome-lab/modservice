@@ -66,43 +66,6 @@ extern "C" DWORD WINAPI env_apply_stub(void* parameter) {
     return 0;
 }
 
-// ── dllmain_stub ───────────────────────────────────────────────────────────
-
-__declspec(noinline) __declspec(safebuffers)
-extern "C" DWORD WINAPI dllmain_stub(void* parameter) {
-    auto* ctx = static_cast<DllMainContext*>(parameter);
-    if (!ctx) return 1;
-
-    using ExitThreadFn = void(NTAPI*)(DWORD);
-    auto exit_thread = reinterpret_cast<ExitThreadFn>(
-        static_cast<uintptr_t>(ctx->hdr.fn_exit_thread));
-
-    auto base = reinterpret_cast<void*>(static_cast<uintptr_t>(ctx->image_base));
-
-    // Call _DllMainCRTStartup.
-    if (ctx->entry_point) {
-        using DllMainFn = BOOL(WINAPI*)(HMODULE, DWORD, LPVOID);
-        auto entry = reinterpret_cast<DllMainFn>(static_cast<uintptr_t>(ctx->entry_point));
-        BOOL ok = entry(static_cast<HMODULE>(base), DLL_PROCESS_ATTACH, nullptr);
-        if (!ok) {
-            DWORD rc = 4;
-            if (ctx->hdr.hijack_mode) {
-                ctx->hdr.result = rc;
-                ctx->hdr.completed = 1;
-                exit_thread(rc);
-            }
-            return rc;
-        }
-    }
-
-    if (ctx->hdr.hijack_mode) {
-        ctx->hdr.result = 0;
-        ctx->hdr.completed = 1;
-        exit_thread(0);
-    }
-    return 0;
-}
-
 #pragma runtime_checks("", restore)
 
 // ── get_stub_info ──────────────────────────────────────────────────────────

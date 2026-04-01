@@ -2,7 +2,6 @@
 #include "syscalls.h"
 #include "win_offsets.h"
 #include "peb_walk.h"
-#include "manual_map.h"
 #include "loader_stub.h"
 
 #include <algorithm>
@@ -30,16 +29,6 @@ void write_error(const std::wstring& msg, uint16_t* buf, uint32_t cap, uint32_t*
 std::wstring to_wstring(const mm_u16_view& view) {
     if (!view.ptr || view.len == 0) return {};
     return std::wstring(reinterpret_cast<const wchar_t*>(view.ptr), view.len);
-}
-
-std::wstring format_system_error(DWORD err) {
-    LPWSTR raw = nullptr;
-    const DWORD sz = FormatMessageW(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-        nullptr, err, 0, reinterpret_cast<LPWSTR>(&raw), 0, nullptr);
-    std::wstring msg;
-    if (sz > 0 && raw) { msg.assign(raw, sz); LocalFree(raw); }
-    return msg;
 }
 
 size_t align_up(size_t v, size_t a) {
@@ -115,6 +104,138 @@ bool validate_options(const mm_execute_request* req, std::wstring& error) {
     return true;
 }
 
+// ── Remote stub execution ──────────────────────────────────────────────────────
+// Allocates code + data pages in the target, runs a thread, waits for
+// completion via HijackHeader polling, then zeros + frees everything.
+
+mm_status execute_remote_stub(HANDLE process, const void* code, size_t code_size,
+                               const void* context, size_t context_size,
+                               uint32_t timeout_ms, std::wstring& error) {
+    if (!code || code_size == 0) {
+        error = L"Stub code is null or empty.";
+        return MM_EXECUTION_FAILED;
+    }
+    if (code_size > 0x100000) {
+        error = L"Stub code size suspiciously large: " + std::to_wstring(code_size);
+        return MM_EXECUTION_FAILED;
+    }
+
+    std::vector<uint8_t> ctx_copy(context_size);
+    memcpy(ctx_copy.data(), context, context_size);
+    auto* hdr = reinterpret_cast<HijackHeader*>(ctx_copy.data());
+    hdr->completed = 0;
+    hdr->result = 0;
+    hdr->hijack_mode = 1;
+
+    // Resolve RtlExitUserThread for clean thread exit.
+    {
+        HMODULE local_ntdll = GetModuleHandleW(L"ntdll.dll");
+        auto* local_fn = syscall_find_local_export(local_ntdll, "RtlExitUserThread");
+        hdr->fn_exit_thread = local_fn ? reinterpret_cast<uint64_t>(local_fn) : 0;
+    }
+
+    // 1. Allocate code page.
+    SIZE_T code_alloc = align_up(code_size, 0x1000);
+    PVOID remote_code = nullptr;
+    auto st = syscall::NtAllocateVirtualMemory(process, &remote_code, 0, &code_alloc,
+                                                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!NT_SUCCESS(st)) { error = L"Failed to allocate remote code page."; return MM_EXECUTION_FAILED; }
+
+    // 2. Allocate data page.
+    SIZE_T data_alloc = align_up(context_size, 0x1000);
+    PVOID remote_data = nullptr;
+    st = syscall::NtAllocateVirtualMemory(process, &remote_data, 0, &data_alloc,
+                                           MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!NT_SUCCESS(st)) {
+        SIZE_T z = 0; syscall::NtFreeVirtualMemory(process, &remote_code, &z, MEM_RELEASE);
+        error = L"Failed to allocate remote data page."; return MM_EXECUTION_FAILED;
+    }
+
+    mm_status result = MM_OK;
+
+    // 3. Write code.
+    st = syscall::NtWriteVirtualMemory(process, remote_code, code, code_size, nullptr);
+    if (!NT_SUCCESS(st)) { error = L"Failed to write stub code."; result = MM_EXECUTION_FAILED; goto cleanup; }
+
+    // 4. Write context data.
+    st = syscall::NtWriteVirtualMemory(process, remote_data, ctx_copy.data(), ctx_copy.size(), nullptr);
+    if (!NT_SUCCESS(st)) { error = L"Failed to write context."; result = MM_EXECUTION_FAILED; goto cleanup; }
+    SecureZeroMemory(ctx_copy.data(), ctx_copy.size());
+
+    // 5. Set code page to RX.
+    { PVOID p = remote_code; SIZE_T s = code_alloc; ULONG o = 0;
+      st = syscall::NtProtectVirtualMemory(process, &p, &s, PAGE_EXECUTE_READ, &o);
+      if (!NT_SUCCESS(st)) { error = L"Failed to set RX."; result = MM_EXECUTION_FAILED; goto cleanup; } }
+
+    // 6. Execute via NtCreateThreadEx.
+    {
+        HANDLE hThread = nullptr;
+        st = syscall::NtCreateThreadEx(&hThread, THREAD_ALL_ACCESS, nullptr, process,
+                                        remote_code, remote_data,
+                                        0, 0, 0, 0, nullptr);
+        if (!NT_SUCCESS(st) || !hThread) {
+            error = L"NtCreateThreadEx failed.";
+            result = MM_EXECUTION_FAILED;
+            goto cleanup;
+        }
+        ScopedNtHandle thread_handle(hThread);
+
+        // Poll for completion.
+        {
+            const uint32_t poll_interval_ms = 1;
+            const uint32_t max_polls = (timeout_ms == 0 ? 60000 : timeout_ms) / poll_interval_ms;
+            bool completed = false;
+
+            for (uint32_t p = 0; p < max_polls; ++p) {
+                HijackHeader poll_hdr{};
+                syscall::NtReadVirtualMemory(process, remote_data,
+                                              &poll_hdr, sizeof(poll_hdr), nullptr);
+                if (poll_hdr.completed == 1) {
+                    if (poll_hdr.result != 0) {
+                        error = L"Remote stub returned error code: " +
+                                std::to_wstring(poll_hdr.result);
+                        result = MM_EXECUTION_FAILED;
+                    }
+                    completed = true;
+                    break;
+                }
+                LARGE_INTEGER delay{};
+                delay.QuadPart = -10000LL; // 1ms
+                syscall::NtDelayExecution(FALSE, &delay);
+            }
+
+            if (!completed) {
+                error = L"Remote stub timed out.";
+                result = MM_TIMEOUT;
+            }
+        }
+
+        LARGE_INTEGER wait_timeout{};
+        wait_timeout.QuadPart = -50000000LL; // 5 seconds
+        syscall::NtWaitForSingleObject(thread_handle.get(), FALSE, &wait_timeout);
+    }
+
+cleanup:
+    {
+        std::vector<uint8_t> zeros((std::max)(code_alloc, data_alloc), 0);
+
+        PVOID code_prot = remote_code;
+        SIZE_T code_prot_sz = code_alloc;
+        ULONG old_p = 0;
+        syscall::NtProtectVirtualMemory(process, &code_prot, &code_prot_sz,
+                                         PAGE_READWRITE, &old_p);
+        syscall::NtWriteVirtualMemory(process, remote_code, zeros.data(), code_alloc, nullptr);
+        SIZE_T free_sz = 0;
+        syscall::NtFreeVirtualMemory(process, &remote_code, &free_sz, MEM_RELEASE);
+
+        syscall::NtWriteVirtualMemory(process, remote_data, zeros.data(), data_alloc, nullptr);
+        free_sz = 0;
+        syscall::NtFreeVirtualMemory(process, &remote_data, &free_sz, MEM_RELEASE);
+    }
+
+    return result;
+}
+
 // ── Environment apply via shellcode ────────────────────────────────────────────
 
 mm_status apply_environment_remote(
@@ -141,7 +262,7 @@ mm_status apply_environment_remote(
         return MM_EXECUTION_FAILED;
     }
 
-    // 2. Compute total size for string data.
+    // 2. Allocate and write string data.
     struct StringAlloc { PVOID remote; SIZE_T size; };
     std::vector<StringAlloc> string_allocs;
     std::vector<uint64_t> name_ptrs;
@@ -155,7 +276,6 @@ mm_status apply_environment_remote(
             return MM_INVALID_ARGUMENT;
         }
 
-        // Allocate and write name string.
         SIZE_T name_bytes = (name.size() + 1) * sizeof(wchar_t);
         SIZE_T name_alloc = align_up(name_bytes, 0x1000);
         PVOID remote_name = nullptr;
@@ -166,7 +286,6 @@ mm_status apply_environment_remote(
         string_allocs.push_back({remote_name, name_alloc});
         name_ptrs.push_back(reinterpret_cast<uint64_t>(remote_name));
 
-        // Allocate and write value string.
         SIZE_T val_bytes = (value.size() + 1) * sizeof(wchar_t);
         SIZE_T val_alloc = align_up(val_bytes, 0x1000);
         PVOID remote_val = nullptr;
@@ -195,7 +314,6 @@ mm_status apply_environment_remote(
     const auto stub = get_stub_info(reinterpret_cast<void*>(&env_apply_stub));
     if (!stub.code || stub.size == 0) {
         error = L"Failed to locate env_apply_stub code.";
-        // Cleanup string allocs will happen below.
     }
 
     mm_status result = MM_OK;
@@ -206,7 +324,7 @@ mm_status apply_environment_remote(
         result = MM_EXECUTION_FAILED;
     }
 
-    // 5. Cleanup: zero and free all string allocations.
+    // 5. Cleanup string allocations.
     for (auto& sa : string_allocs) {
         std::vector<uint8_t> zeros(sa.size, 0);
         syscall::NtWriteVirtualMemory(process, sa.remote, zeros.data(), sa.size, nullptr);
@@ -215,6 +333,74 @@ mm_status apply_environment_remote(
     }
 
     SecureZeroMemory(ctx_buf.data(), ctx_buf.size());
+    return result;
+}
+
+// ── LoadLibrary-based DLL injection ────────────────────────────────────────────
+// Writes the DLL path into the target process and creates a remote thread
+// at LoadLibraryW to load the DLL.
+
+mm_status load_library_remote(
+    HANDLE process,
+    const std::wstring& dll_path,
+    uint32_t timeout_ms,
+    uintptr_t fn_load_library,
+    std::wstring& error)
+{
+    // 1. Allocate remote buffer for the DLL path string.
+    const SIZE_T path_bytes = (dll_path.size() + 1) * sizeof(wchar_t);
+    SIZE_T path_alloc = align_up(path_bytes, 0x1000);
+    PVOID remote_path = nullptr;
+    auto st = syscall::NtAllocateVirtualMemory(process, &remote_path, 0, &path_alloc,
+                                                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!NT_SUCCESS(st)) {
+        error = L"Failed to allocate remote path buffer for: " + dll_path;
+        return MM_EXECUTION_FAILED;
+    }
+
+    // 2. Write the DLL path.
+    st = syscall::NtWriteVirtualMemory(process, remote_path, dll_path.c_str(), path_bytes, nullptr);
+    if (!NT_SUCCESS(st)) {
+        SIZE_T free_sz = 0;
+        syscall::NtFreeVirtualMemory(process, &remote_path, &free_sz, MEM_RELEASE);
+        error = L"Failed to write DLL path for: " + dll_path;
+        return MM_EXECUTION_FAILED;
+    }
+
+    // 3. Create remote thread at LoadLibraryW.
+    HANDLE hThread = nullptr;
+    st = syscall::NtCreateThreadEx(&hThread, THREAD_ALL_ACCESS, nullptr, process,
+                                    reinterpret_cast<PVOID>(fn_load_library),
+                                    remote_path,
+                                    0, 0, 0, 0, nullptr);
+    if (!NT_SUCCESS(st) || !hThread) {
+        SIZE_T free_sz = 0;
+        syscall::NtFreeVirtualMemory(process, &remote_path, &free_sz, MEM_RELEASE);
+        error = L"NtCreateThreadEx failed for LoadLibraryW: " + dll_path;
+        return MM_EXECUTION_FAILED;
+    }
+    ScopedNtHandle thread_handle(hThread);
+
+    // 4. Wait for LoadLibraryW to complete.
+    {
+        LARGE_INTEGER wait_timeout{};
+        const uint32_t effective_timeout = timeout_ms == 0 ? 60000 : timeout_ms;
+        wait_timeout.QuadPart = -static_cast<int64_t>(effective_timeout) * 10000LL;
+        st = syscall::NtWaitForSingleObject(thread_handle.get(), FALSE, &wait_timeout);
+    }
+
+    mm_status result = MM_OK;
+    if (st == 0x00000102 /* STATUS_TIMEOUT */) {
+        error = L"LoadLibraryW timed out for: " + dll_path;
+        result = MM_TIMEOUT;
+    }
+
+    // 5. Free the path buffer.
+    {
+        SIZE_T free_sz = 0;
+        syscall::NtFreeVirtualMemory(process, &remote_path, &free_sz, MEM_RELEASE);
+    }
+
     return result;
 }
 
@@ -262,67 +448,34 @@ mm_status execute_remote(const mm_execute_request* request, std::wstring& error)
     auto status = validate_target_identity(process.get(), request, error);
     if (status != MM_OK) return status;
 
-    // 3. Enumerate remote modules (PEB walk) — used for import resolution + env apply.
+    // 3. Enumerate remote modules (PEB walk) — used for export resolution + env apply.
     std::vector<RemoteModuleInfo> remote_modules;
     status = enumerate_remote_modules(process.get(), remote_modules, error);
     if (status != MM_OK) return status;
 
-    // 4. Blind user-mode ETW in target process.
-    //    Patches EtwEventWrite with "xor eax,eax; ret" (returns STATUS_SUCCESS)
-    //    instead of a bare 0xC3, which is the most commonly signature-matched patch.
-    //    Only when "etw-blind" option is set. Skipped for self-injection.
-    {
-        bool etw_blind_requested = false;
-        for (uint32_t i = 0; i < request->option_count; ++i) {
-            if (to_wstring(request->options[i].name) == L"etw-blind")
-                etw_blind_requested = true;
-        }
-
-        NT_PROCESS_BASIC_INFORMATION etw_pbi{};
-        syscall::NtQueryInformationProcess(process.get(), 0, &etw_pbi, sizeof(etw_pbi), nullptr);
-        bool is_self = (static_cast<uint32_t>(etw_pbi.UniqueProcessId) == GetCurrentProcessId());
-
-        if (etw_blind_requested && !is_self) {
-            // Patch both EtwEventWrite and EtwEventWriteFull for complete coverage.
-            const char* etw_exports[] = { "EtwEventWrite", "EtwEventWriteFull" };
-            for (const auto& mod : remote_modules) {
-                if (_wcsicmp(mod.name.c_str(), L"ntdll.dll") != 0) continue;
-                for (const auto* export_name : etw_exports) {
-                    uintptr_t etw_addr = 0;
-                    std::wstring etw_err;
-                    if (resolve_remote_export(process.get(), mod.base, export_name,
-                                               etw_addr, remote_modules, etw_err) != MM_OK || !etw_addr)
-                        continue;
-                    PVOID patch_addr = reinterpret_cast<PVOID>(etw_addr);
-                    SIZE_T patch_region = 0x1000;
-                    ULONG old_prot = 0;
-                    auto pst = syscall::NtProtectVirtualMemory(process.get(), &patch_addr, &patch_region,
-                                                                PAGE_EXECUTE_READWRITE, &old_prot);
-                    if (NT_SUCCESS(pst)) {
-                        // xor eax, eax; ret → returns 0 (STATUS_SUCCESS).
-                        const uint8_t patch[] = { 0x33, 0xC0, 0xC3 };
-                        syscall::NtWriteVirtualMemory(process.get(),
-                            reinterpret_cast<PVOID>(etw_addr), patch, sizeof(patch), nullptr);
-                        patch_addr = reinterpret_cast<PVOID>(etw_addr);
-                        patch_region = 0x1000;
-                        syscall::NtProtectVirtualMemory(process.get(), &patch_addr, &patch_region,
-                                                         old_prot, &old_prot);
-                    }
-                }
-                break;
-            }
-        }
-    }
-
-    // 5. Apply environment variables via shellcode.
+    // 4. Apply environment variables via shellcode.
     if (request->env_count > 0) {
         status = apply_environment_remote(process.get(), request, request->timeout_ms,
                                            remote_modules, error);
         if (status != MM_OK) return status;
     }
 
-    // 6. Manual-map each module in order.
-    std::vector<MappedModule> mapped_modules;
+    // 6. Resolve LoadLibraryW from remote kernel32.
+    uintptr_t fn_load_library = 0;
+    for (const auto& mod : remote_modules) {
+        if (_wcsicmp(mod.name.c_str(), L"kernel32.dll") == 0) {
+            status = resolve_remote_export(process.get(), mod.base, "LoadLibraryW",
+                                            fn_load_library, remote_modules, error);
+            if (status != MM_OK) return status;
+            break;
+        }
+    }
+    if (!fn_load_library) {
+        error = L"Failed to resolve LoadLibraryW in target process.";
+        return MM_EXECUTION_FAILED;
+    }
+
+    // 7. Load each module via LoadLibraryW.
     for (uint32_t i = 0; i < request->module_count; ++i) {
         const auto module_path = to_wstring(request->modules[i]);
         if (module_path.empty()) {
@@ -331,8 +484,8 @@ mm_status execute_remote(const mm_execute_request* request, std::wstring& error)
             break;
         }
 
-        status = manual_map_remote(process.get(), request->pid, module_path, request->timeout_ms,
-                                    remote_modules, mapped_modules, error);
+        status = load_library_remote(process.get(), module_path, request->timeout_ms,
+                                      fn_load_library, error);
         if (status != MM_OK) break;
     }
 
@@ -341,7 +494,7 @@ mm_status execute_remote(const mm_execute_request* request, std::wstring& error)
 
 }  // namespace
 
-// ── Public ABI (unchanged) ─────────────────────────────────────────────────────
+// ── Public ABI ─────────────────────────────────────────────────────────────────
 
 extern "C" mm_status MM_CALL mm_execute(
     const mm_execute_request* request,

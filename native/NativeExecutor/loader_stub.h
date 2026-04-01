@@ -6,8 +6,8 @@
 // ── Context structures passed to the remote stubs ──────────────────────────────
 // All pointer-sized fields are uint64_t (absolute addresses in the target).
 
-// Hijack header — prepended to ALL stub contexts when using thread hijacking.
-// If hijack_mode == 1, the stub signals completion and exits the thread cleanly
+// Hijack header — prepended to ALL stub contexts.
+// The stub signals completion and exits the thread cleanly
 // via RtlExitUserThread instead of returning.
 struct HijackHeader {
     volatile uint64_t completed;    // 0 → 1 when stub finishes
@@ -29,12 +29,6 @@ struct EnvApplyContext {
     // Followed by env_count × EnvEntry
 };
 
-struct DllMainContext {
-    HijackHeader        hdr;                // hijack header (always present)
-    uint64_t image_base;
-    uint64_t entry_point;                   // _DllMainCRTStartup address (0 → skip)
-};
-
 // ── Loader stub function pointers ──────────────────────────────────────────────
 // These are compiled as normal C++ but are position-independent: they reference
 // no globals, no string literals, and call only through context-struct pointers.
@@ -43,7 +37,6 @@ struct DllMainContext {
 
 extern "C" {
     DWORD WINAPI env_apply_stub(void* parameter);
-    DWORD WINAPI dllmain_stub(void* parameter);
 }
 
 // Return the start address and byte size of a specific stub function by
